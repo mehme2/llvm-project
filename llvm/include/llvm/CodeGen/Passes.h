@@ -188,6 +188,8 @@ LLVM_ABI extern char &RAGreedyLegacyID;
 /// Basic register allocator.
 LLVM_ABI extern char &RABasicID;
 
+LLVM_ABI extern char &RACustomID;
+
 /// VirtRegRewriter pass. Rewrite virtual registers to physical registers as
 /// assigned in VirtRegMap.
 LLVM_ABI extern char &VirtRegRewriterID;

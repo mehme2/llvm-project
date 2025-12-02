@@ -183,6 +183,11 @@ add_llvm_component_library(LLVMCodeGen
   ReachingDefAnalysis.cpp
   RegAllocBase.cpp
   RegAllocBasic.cpp
+  RegAllocCustom.cpp
+  RegAllocCounter.cpp
+  RegAllocBitEA.cpp
+  RegAllocBitEA.c
+  RegInterferenceGraph.cpp
   RegAllocEvictionAdvisor.cpp
   RegAllocFast.cpp
   RegAllocGreedy.cpp
