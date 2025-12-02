@@ -170,10 +170,12 @@ bool RACustom::spillInterferences(const LiveInterval &VirtReg,
 // selectOrSplit().
 MCRegister RACustom::selectOrSplit(const LiveInterval &VirtReg,
                                   SmallVectorImpl<Register> &SplitVRegs) {
-  enqueue(&VirtReg);
-  
-  if(!StopAlgorithm && iterateSolution(SplitVRegs) && false)
-      return 0;
+  if(!StopAlgorithm)
+  {
+      enqueue(&VirtReg);
+      if(iterateSolution(SplitVRegs))
+          return 0;
+  }
 
   bool StoppedThisIteration = !StopAlgorithm;
   StopAlgorithm = true;
@@ -398,7 +400,7 @@ bool RACustom::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       REGALLOC_GRAPH_SOLVER_TABLE
 #undef REGALLOC_GRAPH_SOLVER_ENTRY
 
-          std::vector<int> Solution = Solver(Graph);
+      std::vector<int> Solution = Solver(Graph);
 
       for(unsigned VirtIndex = 0;
           VirtIndex < VirtRegCount;
@@ -446,8 +448,6 @@ bool RACustom::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           }
       }
   }
-
-  std::cout << NAssigned << std::endl;
 
   RegAllocCounter::count(MRI, LIS, VRM);
   RegAllocCounter::updateSpillage(TotalSpillCount, TotalSpillWeight);
