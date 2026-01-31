@@ -134,7 +134,7 @@ Virtual indices represent virtual registers and go from 0 to (Graph.getVirtRegCo
 Physical indices represent physical registers and go from 0 to (Graph.getPhysRegCount() - 1).
 
 Vertex indices represent both virtual and physical registers,
-and are used in functions like 'hasEdge' which is used for checking edges between edges.
+and are used in functions like 'hasEdge' which is used for checking edges between vertices.
 
 Following functions can be used for converting indices:
 
