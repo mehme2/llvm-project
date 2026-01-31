@@ -184,6 +184,7 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocBase.cpp
   RegAllocBasic.cpp
   RegAllocCustom.cpp
+  RegAllocGraph.cpp
   RegAllocCounter.cpp
   RegAllocBitEA.cpp
   RegAllocBitEA.c

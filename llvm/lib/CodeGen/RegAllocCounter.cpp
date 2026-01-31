@@ -81,18 +81,25 @@ void RegAllocCounter::count(llvm::MachineRegisterInfo *MRI, llvm::LiveIntervals 
     RegCount Result = getRegCount(MRI, LIS, VRM);
     LastRegCount = Result;
 
+    /*
     FileOut << "-------------------------------------" << std::endl;
     FileOut << " - Total Register Count: " << Result.VirtRegCount << std::endl;
     FileOut << " - Assigned Register Count: " << Result.AssignedCount << std::endl;
     FileOut << " - Assigned Weight: " << Result.AssignedWeight << std::endl;
+    */
 }
 
-void RegAllocCounter::updateSpillage(int SpillCount, float SpillWeight)
+void RegAllocCounter::addSpillage(const llvm::LiveInterval *Interval)
 {
-    LastSpillCount = SpillCount;
-    LastSpillWeight = SpillWeight;
+    if(Interval->isSpillable())
+    {
+        ++LastSpillCount;
+        LastSpillWeight += Interval->weight();
+    }
+    /*
     FileOut << " - Total Spill Count: " << SpillCount << std::endl;
     FileOut << " - Total Spill Weight: " << SpillWeight << std::endl;
+    */
 }
 
 RegAllocCounter::RegAllocCounter()
@@ -114,6 +121,6 @@ RegAllocCounter::~RegAllocCounter()
     FileOut << " - Assigned Register Count: " << TotalRegCount.AssignedCount << std::endl;
     FileOut << " - Assigned Weight: " << TotalRegCount.AssignedWeight << std::endl;
     FileOut << " - Total Spill Count: " << TotalSpillCount << std::endl;
-    FileOut << " - Total Spill Weight: " << TotalSpillWeight << std::endl;
+    FileOut << " - Total Spill Weight: " << TotalSpillWeight << std::endl << std::endl;
     FileOut.close();
 }

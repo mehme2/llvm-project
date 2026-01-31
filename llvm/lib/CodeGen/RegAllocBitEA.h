@@ -86,12 +86,13 @@ int popcountl(uint64_t n);
 int BitEA(
     int graph_size, 
     const block_t *edges, 
+    const block_t *hints, 
     int *weights, 
     int population_size,
     int base_color_count, 
     int max_gen_num, 
     block_t *best_solution, 
-    int *best_fitness, 
+    int64_t *best_fitness, 
     float *best_solution_time,
     int *uncolored_num
 );
@@ -126,6 +127,7 @@ int get_rand_color(int max_color_num, int colors_used, block_t *used_color_list)
 void merge_and_fix(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     const block_t **parent_color,
     block_t *child_color,
@@ -151,6 +153,7 @@ void merge_and_fix(
 void fix_conflicts(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     int *conflict_count,
     int *total_conflicts,
@@ -163,6 +166,7 @@ void fix_conflicts(
 void search_back(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     block_t *child, 
     int color_count,
@@ -174,6 +178,7 @@ void search_back(
 void local_search(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     block_t *child, 
     int color_count,
@@ -200,9 +205,10 @@ void local_search(
  * @param uncolored Output pointer to the number of uncolored vertices in the best solution.
  * @return Return the fitness of the new individual.
  */
-int crossover (
+int64_t crossover (
     int graph_size, 
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     int color_num1, 
     int color_num2, 

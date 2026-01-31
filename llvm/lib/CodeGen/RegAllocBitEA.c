@@ -8,6 +8,8 @@
 
 #define _SORT_R_INLINE inline
 
+#define HINT_FACTOR 1
+
 #if (defined __APPLE__ || defined __MACH__ || defined __DARWIN__ || \
      (defined __FreeBSD__ && !defined(qsort_r)) || defined __DragonFly__)
 #  define _SORT_R_BSD
@@ -343,12 +345,13 @@ strtok_r (char *s, const char *delim, char **save_ptr)
 int BitEA(
     int graph_size, 
     const block_t *edges, 
+    const block_t *hints, 
     int *weights, 
     int population_size,
     int base_color_count, 
     int max_gen_num, 
     block_t *best_solution, 
-    int *best_fitness, 
+    int64_t *best_fitness, 
     float *best_solution_time,
     int *uncolored_num
 ) {
@@ -356,7 +359,7 @@ int BitEA(
     block_t *population[population_size];
     int color_count[population_size];
     int uncolored[population_size];
-    int fitness[population_size];
+    int64_t fitness[population_size];
     for (int i = 0; i < population_size; i++) {
         population[i] = calloc(base_color_count, TOTAL_BLOCK_NUM(graph_size) * sizeof(block_t));
         uncolored[i] = base_color_count;
@@ -398,6 +401,7 @@ int BitEA(
         temp_fitness = crossover (
             graph_size, 
             edges, 
+            hints, 
             weights,
             color_count[parent1], 
             color_count[parent2], 
@@ -478,6 +482,7 @@ int get_rand_color(int max_color_num, int colors_used, block_t used_color_list[]
 void fix_conflicts(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     int *conflict_count,
     int *total_conflicts,
@@ -486,18 +491,43 @@ void fix_conflicts(
     int *pool_total
 ) {
     block_t (*edges_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])edges;
+    block_t (*hints_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])hints;
 
     // Keep removing problematic vertices until all conflicts are gone.
     int i, worst_vert = 0, vert_block;
+    int64_t worst_effective_weight = (__INT_MAX__ << 1);
     block_t vert_mask;
     while(*total_conflicts > 0) {
         // Find the vertex with the most conflicts.
         for(i = 0; i < graph_size; i++) {
-            if (CHECK_COLOR(color, i) &&
-                (conflict_count[worst_vert] < conflict_count[i] ||
-                 (conflict_count[worst_vert] == conflict_count[i] && 
-                  (weights[worst_vert] > weights[i] || (weights[worst_vert] == weights[i] && rand()%2))))) {
-                worst_vert = i;
+            if(hints)
+            {
+                int64_t effective_weight = weights[i];
+                for(int j = 0; j < TOTAL_BLOCK_NUM(graph_size); ++j)
+                {
+                    if(color[j] & (*hints_p)[i][j])
+                    {
+                        effective_weight *= (HINT_FACTOR + 1);
+                        break;
+                    }
+                }
+
+                if (CHECK_COLOR(color, i) &&
+                    (conflict_count[worst_vert] < conflict_count[i] ||
+                     (conflict_count[worst_vert] == conflict_count[i] && 
+                      (worst_effective_weight > effective_weight || (worst_effective_weight == effective_weight && rand()%2))))) {
+                    worst_effective_weight = effective_weight;
+                    worst_vert = i;
+                }
+            }
+            else
+            {
+                if (CHECK_COLOR(color, i) &&
+                    (conflict_count[worst_vert] < conflict_count[i] ||
+                     (conflict_count[worst_vert] == conflict_count[i] && 
+                      (weights[worst_vert] > weights[i] || (weights[worst_vert] == weights[i] && rand()%2))))) {
+                    worst_vert = i;
+                }
             }
         }
 
@@ -522,6 +552,7 @@ void fix_conflicts(
 void merge_and_fix(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     const block_t **parent_color,
     block_t *child_color,
@@ -578,6 +609,7 @@ void merge_and_fix(
     fix_conflicts(
         graph_size,
         edges,
+        hints,
         weights,
         conflict_count,
         &total_conflicts,
@@ -590,6 +622,7 @@ void merge_and_fix(
 void search_back(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     block_t *child, 
     int color_count,
@@ -598,6 +631,7 @@ void search_back(
 ) {
     block_t (*edges_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])edges;
     block_t (*child_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])child;
+    block_t (*hints_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])edges;
 
     int conflict_count, last_conflict, last_conflict_block = 0;
     block_t i_mask, temp_mask, last_conflict_mask = 0;
@@ -635,13 +669,31 @@ void search_back(
 
                 // If only 1 conflict exists and its weight is smaller
                 // than that of the vertex in question, replace it.
-                } else if (conflict_count == 1 && weights[last_conflict] < weights[i]) {
-                    (*child_p)[j][i_block] |= i_mask;
-                    pool[i_block] &= ~i_mask;
+                } else if (conflict_count == 1) {
+                    int64_t last_conflict_effective_weight = weights[last_conflict];
+                    int64_t effective_weight = weights[i];
+                    if(hints)
+                    {
+                        for(int k = 0; k < TOTAL_BLOCK_NUM(graph_size); ++k)
+                        {
+                            if((*child_p)[j][k] & (*hints_p)[i][k])
+                            {
+                                effective_weight = (weights[i] * (HINT_FACTOR + 1));
+                            }
+                            if((*child_p)[j][k] & (*hints_p)[last_conflict][k])
+                            {
+                                last_conflict_effective_weight = (weights[i] * (HINT_FACTOR + 1));
+                            }
+                        }
+                    }
+                    if (last_conflict_effective_weight < effective_weight) {
+                        (*child_p)[j][i_block] |= i_mask;
+                        pool[i_block] &= ~i_mask;
 
-                    (*child_p)[j][last_conflict_block] &= ~last_conflict_mask;
-                    pool[last_conflict_block] |= last_conflict_mask;
-                    break;
+                        (*child_p)[j][last_conflict_block] &= ~last_conflict_mask;
+                        pool[last_conflict_block] |= last_conflict_mask;
+                        break;
+                    }
                 }
             }
         }
@@ -651,6 +703,7 @@ void search_back(
 void local_search(
     int graph_size,
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     block_t *child, 
     int color_count,
@@ -659,10 +712,11 @@ void local_search(
 ) {
     block_t (*edges_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])edges;
     block_t (*child_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])child;
+    block_t (*hints_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])hints;
 
     int i, j, k, h, i_block;
     block_t i_mask, temp_mask;
-    int competition;
+    int64_t competition;
     int conflict_count;
     block_t conflict_array[TOTAL_BLOCK_NUM(graph_size)];
 
@@ -684,8 +738,32 @@ void local_search(
                         temp_mask = conflict_array[k];
                         conflict_count += popcountl(temp_mask);
                         for(h = 0; h < sizeof(block_t)*8; h++)
-                            if((temp_mask >> h) & (block_t)1)
+                            if((temp_mask >> h) & (block_t)1) {
                                 competition += weights[k*8*sizeof(block_t)+h];
+                                if(hints)
+                                {
+                                    int is_hint = 0;
+                                    for(int l = 0; l < TOTAL_BLOCK_NUM(graph_size); ++l) {
+                                        if((*child_p)[j][l] & (*hints_p)[k*8*sizeof(block_t)+h][l])
+                                            is_hint = 1;
+                                    }
+                                    if(is_hint) {
+                                        competition += HINT_FACTOR*weights[k*8*sizeof(block_t)+h];
+                                    }
+                                }
+                            }
+                    }
+                }
+
+                if(hints)
+                {
+                    int is_hint = 0;
+                    for(int l = 0; l < TOTAL_BLOCK_NUM(graph_size); ++l) {
+                        if((*child_p)[j][l] & (*hints_p)[i][j])
+                            is_hint = 1;
+                    }
+                    if(is_hint) {
+                        competition -= HINT_FACTOR*weights[i];
                     }
                 }
 
@@ -717,9 +795,10 @@ void local_search(
     }
 }
 
-int crossover (
+int64_t crossover (
     int graph_size, 
     const block_t *edges, 
+    const block_t *hints, 
     const int *weights,
     int color_num1, 
     int color_num2, 
@@ -767,6 +846,7 @@ int crossover (
             merge_and_fix(
                 graph_size,
                 edges,
+                hints,
                 weights,
                 chosen_parent_colors,
                 (*child_p)[i],
@@ -784,6 +864,7 @@ int crossover (
         search_back(
             graph_size,
             edges,
+            hints,
             weights,
             child, 
             i,
@@ -810,6 +891,7 @@ int crossover (
     local_search(
         graph_size,
         edges,
+        hints,
         weights,
         child,
         target_color_count,
@@ -818,7 +900,7 @@ int crossover (
     );
 
     // If the pool is not empty, randomly allocate the remaining vertices in the colors.
-    int fitness = 0, temp_block;
+    int64_t fitness = 0, temp_block;
     block_t temp_mask;
     if(pool_count > 0) {
         int color_num;
@@ -839,6 +921,33 @@ int crossover (
     // All of the vertices were allocated and no conflicts were detected.
     } else {
         fitness = 0;
+    }
+
+    if(hints)
+    {
+        block_t (*hints_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])hints;
+
+        for(int i = 0; i < graph_size; ++i) {
+            int block_num = BLOCK_INDEX(i);
+            int mask = MASK(i);
+
+            int color_num;
+            for(color_num = 0; color_num < target_color_count; ++color_num)
+            {
+                if((*child_p)[color_num][block_num] & mask)
+                    break;
+            }
+
+            int is_hint = 0;
+            for(int j = 0; j < TOTAL_BLOCK_NUM(graph_size); ++j) {
+                if((*hints_p)[i][j] & (*child_p)[color_num][j]) {
+                    is_hint = 1;
+                }
+            }
+
+            if(!is_hint)
+                fitness += HINT_FACTOR*weights[i];
+        }
     }
 
     *uncolored = pool_count;

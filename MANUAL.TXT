@@ -1,0 +1,174 @@
+CONTENTS
+
+1 USAGE
+1.1 Wrapper Configuration
+1.2 BitEA Configuration
+1.3 Logging
+
+2 SOURCE CODE
+2.1 Source Files
+2.2 Changes in LLVM
+2.3 Adding Algorithms
+2.4 Interference Graph
+2.5 BitEA Modifications
+
+
+
+
+
+1 USAGE
+
+
+1.1 Wrapper Configuration
+
+
+The custom allocator has a flag added to control what to do with uncolored registers:
+
+clang -mllvm regalloc=bitea -mllvm -uncolored-behavior=spill-only
+
+The 'uncolored-behavior' flag can have three different values:
+
+spill-only: Uncolored registers get spilled directly. The default value.
+split: Splitting will be tried before spilling.
+greedy: Uncolored registers will be handled according to greedy allocator's logic.
+
+
+
+1.2 BitEA Configuration
+
+
+Parameters of BitEA can be modified with custom llvm flags.
+
+clang
+-mllvm -regalloc=bitea         -> Set the allocator
+-mllvm -bitea-iterations=30000 -> Set iteration count
+-mllvm -bitea-population=8     -> Set population
+-mllvm -bitea-use-hints=True   -> Use hints in fitness calculation
+
+
+
+1.3 Logging
+
+
+During compilation status of allocation will be output to stdout like:
+
+core_bench_list -> Function name
+71/81, 10       -> First iteration in order: assigned virtual registers, total virtual registers, unassigned registers.
+44/44, 0        -> Second iteration
+
+The values do not include extra assignments in greedy uncolored-behavior mode.
+
+Total assignment/spill counts/weights will be output as files with names:
+[file name]_regcount.txt
+
+
+
+
+
+2 SOURCE CODE
+
+
+2.1 Source Files
+
+
+Modified files are mainly located in 'llvm/lib/CodeGen'.
+The custom allocator is implemented in 'RegAllocGraph.cpp'.
+The wrapper method for BitEA is implemented in 'RegAllocBitEA.cpp'.
+Wrapped BitEA methods and portable versions of the depended functions were included in 'RegAllocBitEA.c'.
+
+
+
+2.2 Changes in LLVM
+
+
+The custom allocator RAGraph is implemented by extending RAGreedy.
+RAGreedy's private declarations were changed to protected.
+The RegAllocCounter class was implemented to count and log assigned/spilled registers.
+Calls to the class was inserted in RABasic, RAGreedy and RAGraph.
+
+
+
+2.3 Adding Algorithms
+
+
+To add new algorithms we need to define a wrapper method and register it.
+
+Registration is done by editing 'RegAllocGraphSolvers.h' like following:
+
+#define REGALLOC_GRAPH_SOLVER_TABLE \
+REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocBitEASolver, bitea) \
+REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocExampleSolver, example) \
+
+The wrapper method can be implemented like:
+
+#include "RegAllocGraphSolvers.h"
+
+REGALLOC_GRAPH_SOLVER(RegAllocExampleSolver)
+{
+    ...
+}
+
+The 'REGALLOC_GRAPH_SOLVER' macro is equivalent to:
+
+std::vector<int> RegAllocExampleSolver(const RegInterferenceGraph &Graph)
+
+The method input is the generated interference graph.
+The output is an array that maps virtual registers to physical registers.
+The indices represent virtual register indices and values represent physical register indices.
+A value of -1 means the virtual was uncolored.
+
+The new algorithm can be used with the llvm flag 'regalloc'.
+
+llc -regalloc=example
+
+clang -mllvm -regalloc=example
+
+
+
+2.4 Interference Graph
+
+
+The interference graph has three different index types: virtual, physical and vertex.
+
+Virtual indices represent virtual registers and go from 0 to (Graph.getVirtRegCount() - 1).
+Physical indices represent physical registers and go from 0 to (Graph.getPhysRegCount() - 1).
+
+Vertex indices represent both virtual and physical registers,
+and are used in functions like 'hasEdge' which is used for checking edges between edges.
+
+Following functions can be used for converting indices:
+
+unsigned physIndexToVertIndex(unsigned PhysIndex) const;
+unsigned virtIndexToVertIndex(unsigned VirtIndex) const;
+
+unsigned vertIndexToPhysIndex(unsigned VertexIndex) const;
+unsigned vertIndexToVirtIndex(unsigned VertexIndex) const;
+
+Some functions were added to make wrapping BitEA easier.
+
+The function 'getAdjacencyMatrix' returns a pointer 64-bit-aligned adjacency matrix.
+
+The function 'vertexWeightAsInteger' converts float weights to integer values.
+The function also assigns fixed high values to physical registers and unspillable virtual registers.
+
+More details can be found in 'RegInterferenceGraph.h' and 'RegInterferenceGraph.cpp'.
+
+
+
+2.5 BitEA Modifications
+
+
+Some modifications were made to BitEA implementation.
+
+Fitness is calculated by summing 32-bit vertex weights.
+In floating point weights calculated by llvm, the range in order of magnitudes is very big
+so very high values were used when converting them to integers.
+Altough these integer values themselves do not overflow in 32-bit, when summed together they can cause overflows
+so variables in sum operations were converted to 64-bit.
+Some types in BitEA signature was also changed.
+
+Modifications were also made to change fitness calculations to include allocation hints provided by llvm.
+These hints are represented as a adjacency matrix similar to edges.
+To take the hint matrix as input BitEA signatures were changed.
+
+The timer in BitEA function was removed but the output pointer in BitEA signature remains.

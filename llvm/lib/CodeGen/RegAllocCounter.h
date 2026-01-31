@@ -26,6 +26,6 @@ class RegAllocCounter
 public:
     static void startFunction(const llvm::MachineFunction *MF);
     static void count(llvm::MachineRegisterInfo *MRI, llvm::LiveIntervals *LIS, llvm::VirtRegMap *VRM);
-    static void updateSpillage(int SpillCount, float SpillWeight);
+    static void addSpillage(const llvm::LiveInterval *Interval);
     ~RegAllocCounter();
 };

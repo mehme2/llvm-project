@@ -4,38 +4,10 @@
 #include "llvm/Support/CommandLine.h"
 
 #include <iostream>
-#include <fstream>
 
 static llvm::cl::opt<uint32_t> IterationCount("bitea-iterations", llvm::cl::init(10000), llvm::cl::Hidden, llvm::cl::desc("bitea iteration count"));
 static llvm::cl::opt<uint32_t> PopulationCount("bitea-population", llvm::cl::init(100), llvm::cl::Hidden, llvm::cl::desc("bitea population count"));
-
-void SaveEdgesAndWeights(RegInterferenceGraph Graph, std::vector<int> &Weights)
-{
-    unsigned VertexCount = Graph.getVertexCount();
-    std::ofstream FileOut;
-    FileOut.open("example.edgelist");
-    for(unsigned VertexA = 0;
-        VertexA < VertexCount;
-        ++VertexA)
-    {
-        for(unsigned VertexB = VertexA + 1;
-            VertexB < VertexCount;
-            ++VertexB)
-        {
-            if(Graph.hasEdge(VertexA, VertexB))
-            {
-                FileOut << VertexA << " " << VertexB << std::endl;
-            }
-        }
-    }
-    FileOut.close();
-    FileOut.open("example.col.w");
-    for(int Weight : Weights)
-    {
-        FileOut << Weight << std::endl;
-    }
-    FileOut.close();
-}
+static llvm::cl::opt<bool> UseHints("bitea-use-hints", llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::desc("use hints in bitea"));
 
 REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
 {
@@ -53,29 +25,22 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
 
     std::vector<uint64_t> BestSolution(PhysCount*WordsPerColor);
     float BestSolutionTime;
-    int BestFitness;
+    int64_t BestFitness;
     int UncoloredCount;
 
     std::vector<int> Weights(VertexCount);
 
-    for(unsigned PhysIndex = 0;
-        PhysIndex < PhysCount;
-        ++PhysIndex)
+    for(unsigned VertIndex = 0;
+        VertIndex < VertexCount;
+        ++VertIndex)
     {
-        Weights[Graph.physIndexToVertIndex(PhysIndex)] = 10000000;
-    }
-
-    for(unsigned VirtIndex = 0;
-        VirtIndex < VirtCount;
-        ++VirtIndex)
-    {
-        Weights[Graph.virtIndexToVertIndex(VirtIndex)] =
-            Graph.isSpillable(VirtIndex) ? 1000000 * Graph.getWeight(VirtIndex) : 10000000;
+        Weights[VertIndex] = Graph.vertexWeightAsInteger(VertIndex);
     }
 
     int ColorCount = BitEA(
         VertexCount,
         Graph.getAdjacencyMatrix(),
+        UseHints ? Graph.getHintAdjacencyMatrix() : 0,
         Weights.data(),
         PopulationCount,
         PhysCount,
@@ -85,6 +50,81 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
         &BestSolutionTime,
         &UncoloredCount);
 
+    int RemovedVertices = 0;
+    for(int ColorIndex = 0;
+        ColorIndex < ColorCount;
+        ++ColorIndex)
+    {
+        bool HasConflicts = true;
+        while(HasConflicts)
+        {
+            HasConflicts = false;
+            int VertexToRemove = -1;
+            int64_t HighestConflictWeight = 0;
+            unsigned PhysIndex;
+            for(PhysIndex = 0;
+                PhysIndex < PhysCount;
+                ++PhysIndex)
+            {
+                unsigned WordIndex = (PhysIndex / WordBitCount);
+                unsigned BitIndex = (PhysIndex % WordBitCount);
+                if(BestSolution[WordsPerColor*ColorIndex + WordIndex] & (1LL << BitIndex)) break;
+            }
+            for(unsigned VertIndexA = Graph.virtIndexToVertIndex(0);
+                VertIndexA < VertexCount;
+                ++VertIndexA)
+            {
+                unsigned WordIndexA = (VertIndexA / WordBitCount);
+                unsigned BitIndexA = (VertIndexA % WordBitCount);
+                if((BestSolution[WordsPerColor*ColorIndex + WordIndexA] & (1LL << BitIndexA)) == 0) continue;
+                int64_t ConflictWeight = 0;
+                if(Graph.isHint(PhysIndex, VertIndexA))
+                {
+                    ConflictWeight -= Weights[VertIndexA];
+                }
+                for(unsigned VertIndexB = 0;
+                    VertIndexB < VertexCount;
+                    ++VertIndexB)
+                {
+                    if(VertIndexA == VertIndexB) continue;
+                    if(!Graph.hasEdge(VertIndexA, VertIndexB)) continue;
+                    unsigned WordIndexB = (VertIndexB / WordBitCount);
+                    unsigned BitIndexB = (VertIndexB % WordBitCount);
+                    if((BestSolution[WordsPerColor*ColorIndex + WordIndexB] & (1LL << BitIndexB)) == 0) continue;
+                    //std::cout << VertIndexA << " " << VertIndexB << std::endl;
+                    HasConflicts = true;
+                    ConflictWeight += Weights[VertIndexB];
+                    if(Graph.isHint(PhysIndex, VertIndexB))
+                    {
+                        ConflictWeight += Weights[VertIndexB];
+                    }
+                }
+                if(ConflictWeight > HighestConflictWeight)
+                {
+                    HighestConflictWeight = ConflictWeight;
+                    VertexToRemove = VertIndexA;
+                }
+            }
+            if(HasConflicts)
+            {
+                unsigned WordIndex = (VertexToRemove / WordBitCount);
+                unsigned BitIndex = (VertexToRemove % WordBitCount);
+                //std::cout << VertexToRemove << std::endl;
+                BestSolution[WordsPerColor*ColorIndex + WordIndex] &= ~(1LL << BitIndex);
+                ++RemovedVertices;
+            }
+        }
+    }
+
+    /*
+    std::cout << "Uncolored Count: " << UncoloredCount << std::endl;
+    if(RemovedVertices)
+    {
+        std::cout << "Removed " << RemovedVertices << " Vertices" << std::endl;
+    }
+    */
+
+    /*
     int TotalConflicts = 0;
     std::vector<uint64_t> Pool(WordsPerColor, 0);
     for(int ColorIndex = 0;
@@ -112,6 +152,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
             Pool.data(),
             &PoolTotal);
     }
+    */
 
     std::vector<int> Solution(VirtCount, -1);
 
@@ -139,15 +180,32 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                     else
                     {
                         unsigned VirtRegIndex = Graph.vertIndexToVirtIndex(VertIndex);
-                        if((PhysRegIndex != -1) &&
-                           Graph.hasEdge(VertIndex,
-                                         Graph.physIndexToVertIndex(PhysRegIndex)))
+                        /*
+                        if(PhysRegIndex == -1)
                         {
+                            for(unsigned WordIndex = 0;
+                                WordIndex < WordsPerColor;
+                                ++WordIndex)
+                            {
+                                for(unsigned BitIndex = 0;
+                                    BitIndex < 64;
+                                    ++BitIndex)
+                                {
+                                    std::cout << ((BestSolution[ColorIndex*WordsPerColor + WordIndex] >> BitIndex) & 1);
+                                }
+                                std::cout << std::endl;
+                            }
                         }
-                        else
+                        assert(PhysRegIndex != -1);
+                        */
+                        if(PhysRegIndex == -1)
                         {
-                            Solution[VirtRegIndex] = PhysRegIndex;
+                            std::cout << "Warning: Color with no physical." << std::endl;
+                            break;
                         }
+                        assert(!Graph.hasEdge(VertIndex,
+                                         Graph.physIndexToVertIndex(PhysRegIndex)));
+                        Solution[VirtRegIndex] = PhysRegIndex;
                     }
                 }
                 else

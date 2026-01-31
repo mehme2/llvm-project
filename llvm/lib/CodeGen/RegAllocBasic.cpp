@@ -31,6 +31,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "RegAllocCounter.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
@@ -152,6 +154,7 @@ bool RABasic::spillInterferences(const LiveInterval &VirtReg,
     Matrix->unassign(*Spill);
 
     // Spill the extracted interval.
+    RegAllocCounter::addSpillage(Spill);
     LiveRangeEdit LRE(Spill, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
     spiller().spill(LRE);
   }
@@ -212,6 +215,7 @@ MCRegister RABasic::selectOrSplit(const LiveInterval &VirtReg,
   LLVM_DEBUG(dbgs() << "spilling: " << VirtReg << '\n');
   if (!VirtReg.isSpillable())
     return ~0u;
+  RegAllocCounter::addSpillage(&VirtReg);
   LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   spiller().spill(LRE);
 
@@ -225,6 +229,7 @@ bool RABasic::runOnMachineFunction(MachineFunction &mf) {
                     << "********** Function: " << mf.getName() << '\n');
 
   MF = &mf;
+  RegAllocCounter::startFunction(MF);
   auto &MBFI = getAnalysis<MachineBlockFrequencyInfoWrapperPass>().getMBFI();
   auto &LiveStks = getAnalysis<LiveStacksWrapperLegacy>().getLS();
   auto &MDT = getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
@@ -241,6 +246,7 @@ bool RABasic::runOnMachineFunction(MachineFunction &mf) {
       createInlineSpiller({*LIS, LiveStks, MDT, MBFI}, *MF, *VRM, VRAI));
 
   allocatePhysRegs();
+  RegAllocCounter::count(MRI, LIS, VRM);
   postOptimization();
 
   // Diagnostic output before rewriting
