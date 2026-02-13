@@ -5,6 +5,10 @@
 
 #include <iostream>
 
+#include "llvm/Support/MathExtras.h"
+
+const float c_huge_valf = llvm::huge_valf;
+
 static llvm::cl::opt<uint32_t> IterationCount("bitea-iterations", llvm::cl::init(10000), llvm::cl::Hidden, llvm::cl::desc("bitea iteration count"));
 static llvm::cl::opt<uint32_t> PopulationCount("bitea-population", llvm::cl::init(100), llvm::cl::Hidden, llvm::cl::desc("bitea population count"));
 static llvm::cl::opt<bool> UseHints("bitea-use-hints", llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::desc("use hints in bitea"));
@@ -25,17 +29,35 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
 
     std::vector<uint64_t> BestSolution(PhysCount*WordsPerColor);
     float BestSolutionTime;
-    int64_t BestFitness;
+    fitness_t BestFitness;
     int UncoloredCount;
 
-    std::vector<int> Weights(VertexCount);
+    std::vector<weight_t> Weights(VertexCount);
 
     for(unsigned VertIndex = 0;
         VertIndex < VertexCount;
         ++VertIndex)
     {
+#if BITEA_USE_FLOAT
+        if(Graph.isPhys(VertIndex))
+        {
+            //Weights[VertIndex] = llvm::huge_valf;
+            Weights[VertIndex] = 10000000.0f;
+        }
+        else
+        {
+            unsigned VirtIndex = Graph.vertIndexToVirtIndex(VertIndex);
+            if(Graph.isSpillable(VirtIndex))
+            {
+                Weights[VertIndex] = Graph.getWeight(VirtIndex);
+            }
+            else Weights[VertIndex] = 10000.0f;
+        }
+#else
         Weights[VertIndex] = Graph.vertexWeightAsInteger(VertIndex);
+#endif
     }
+
 
     int ColorCount = BitEA(
         VertexCount,
@@ -50,6 +72,8 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
         &BestSolutionTime,
         &UncoloredCount);
 
+    std::cout << "Best Fitness: " << BestFitness << std::endl;
+
     int RemovedVertices = 0;
     for(int ColorIndex = 0;
         ColorIndex < ColorCount;
@@ -60,7 +84,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
         {
             HasConflicts = false;
             int VertexToRemove = -1;
-            int64_t HighestConflictWeight = 0;
+            fitness_t HighestConflictWeight = 0;
             unsigned PhysIndex;
             for(PhysIndex = 0;
                 PhysIndex < PhysCount;
@@ -70,6 +94,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                 unsigned BitIndex = (PhysIndex % WordBitCount);
                 if(BestSolution[WordsPerColor*ColorIndex + WordIndex] & (1LL << BitIndex)) break;
             }
+            if(PhysIndex == PhysCount) continue;
             for(unsigned VertIndexA = Graph.virtIndexToVertIndex(0);
                 VertIndexA < VertexCount;
                 ++VertIndexA)
@@ -77,7 +102,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                 unsigned WordIndexA = (VertIndexA / WordBitCount);
                 unsigned BitIndexA = (VertIndexA % WordBitCount);
                 if((BestSolution[WordsPerColor*ColorIndex + WordIndexA] & (1LL << BitIndexA)) == 0) continue;
-                int64_t ConflictWeight = 0;
+                fitness_t ConflictWeight = 0;
                 if(Graph.isHint(PhysIndex, VertIndexA))
                 {
                     ConflictWeight -= Weights[VertIndexA];
@@ -94,7 +119,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                     //std::cout << VertIndexA << " " << VertIndexB << std::endl;
                     HasConflicts = true;
                     ConflictWeight += Weights[VertIndexB];
-                    if(Graph.isHint(PhysIndex, VertIndexB))
+                    if(UseHints && Graph.isHint(PhysIndex, VertIndexB))
                     {
                         ConflictWeight += Weights[VertIndexB];
                     }
@@ -173,6 +198,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                 {
                     Word &= ~(((uint64_t)1) << BitIndex);
                     unsigned VertIndex = BitIndex + WordBitCount*WordIndex;
+                    if(VertIndex >= VertexCount) continue;
                     if(Graph.isPhys(VertIndex))
                     {
                         PhysRegIndex = Graph.vertIndexToPhysIndex(VertIndex);

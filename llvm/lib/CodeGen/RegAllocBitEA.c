@@ -346,12 +346,12 @@ int BitEA(
     int graph_size, 
     const block_t *edges, 
     const block_t *hints, 
-    int *weights, 
+    weight_t *weights, 
     int population_size,
     int base_color_count, 
     int max_gen_num, 
     block_t *best_solution, 
-    int64_t *best_fitness, 
+    fitness_t *best_fitness, 
     float *best_solution_time,
     int *uncolored_num
 ) {
@@ -359,12 +359,16 @@ int BitEA(
     block_t *population[population_size];
     int color_count[population_size];
     int uncolored[population_size];
-    int64_t fitness[population_size];
+    fitness_t fitness[population_size];
     for (int i = 0; i < population_size; i++) {
         population[i] = calloc(base_color_count, TOTAL_BLOCK_NUM(graph_size) * sizeof(block_t));
         uncolored[i] = base_color_count;
         color_count[i] = base_color_count;
+#if BITEA_USE_FLOAT
+        fitness[i] = c_huge_valf;
+#else
         fitness[i] = __INT_MAX__;
+#endif
     }
 
     pop_complex_random(
@@ -384,7 +388,8 @@ int BitEA(
     int best_i = 0;
     int target_color = base_color_count;
     int temp_uncolored;
-    int parent1, parent2, child_colors, temp_fitness;
+    int parent1, parent2, child_colors;
+    fitness_t temp_fitness;
     int bad_parent;
     for(int i = 0; i < max_gen_num; i++) {
         if(target_color == 0)
@@ -483,7 +488,7 @@ void fix_conflicts(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     int *conflict_count,
     int *total_conflicts,
     block_t *color,
@@ -495,14 +500,19 @@ void fix_conflicts(
 
     // Keep removing problematic vertices until all conflicts are gone.
     int i, worst_vert = 0, vert_block;
-    int64_t worst_effective_weight = (__INT_MAX__ << 1);
+    fitness_t worst_effective_weight;
+#if BITEA_USE_FLOAT
+    worst_effective_weight = c_huge_valf;
+#else
+    worst_effective_weight = (__INT_MAX__ << 1);
+#endif
     block_t vert_mask;
     while(*total_conflicts > 0) {
         // Find the vertex with the most conflicts.
         for(i = 0; i < graph_size; i++) {
             if(hints)
             {
-                int64_t effective_weight = weights[i];
+                fitness_t effective_weight = weights[i];
                 for(int j = 0; j < TOTAL_BLOCK_NUM(graph_size); ++j)
                 {
                     if(color[j] & (*hints_p)[i][j])
@@ -553,7 +563,7 @@ void merge_and_fix(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     const block_t **parent_color,
     block_t *child_color,
     block_t *pool,
@@ -623,7 +633,7 @@ void search_back(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     block_t *child, 
     int color_count,
     block_t *pool,
@@ -670,8 +680,8 @@ void search_back(
                 // If only 1 conflict exists and its weight is smaller
                 // than that of the vertex in question, replace it.
                 } else if (conflict_count == 1) {
-                    int64_t last_conflict_effective_weight = weights[last_conflict];
-                    int64_t effective_weight = weights[i];
+                    fitness_t last_conflict_effective_weight = weights[last_conflict];
+                    fitness_t effective_weight = weights[i];
                     if(hints)
                     {
                         for(int k = 0; k < TOTAL_BLOCK_NUM(graph_size); ++k)
@@ -704,7 +714,7 @@ void local_search(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     block_t *child, 
     int color_count,
     block_t *pool,
@@ -716,7 +726,7 @@ void local_search(
 
     int i, j, k, h, i_block;
     block_t i_mask, temp_mask;
-    int64_t competition;
+    fitness_t competition;
     int conflict_count;
     block_t conflict_array[TOTAL_BLOCK_NUM(graph_size)];
 
@@ -795,11 +805,11 @@ void local_search(
     }
 }
 
-int64_t crossover (
+fitness_t crossover (
     int graph_size, 
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     int color_num1, 
     int color_num2, 
     const block_t *parent1, 
@@ -900,7 +910,8 @@ int64_t crossover (
     );
 
     // If the pool is not empty, randomly allocate the remaining vertices in the colors.
-    int64_t fitness = 0, temp_block;
+    fitness_t fitness = 0;
+    int temp_block;
     block_t temp_mask;
     if(pool_count > 0) {
         int color_num;
@@ -955,26 +966,33 @@ int64_t crossover (
     return fitness;
 }
 
+int sign(weight_t val)
+{
+    if (val > 0) return 1;
+    if (val < 0) return -1;
+    return 0;
+}
+
 int comp_crit_1(const void* a, const void* b, void* metrics) {
-    int* weights = ((int**)metrics)[0];
+    weight_t* weights = ((int**)metrics)[0];
     int* degrees = ((int**)metrics)[1];
-    return (weights[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b]);
+    return sign((weights[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b]));
 }
 
 int comp_crit_2(const void* a, const void* b, void* metrics) {
-    int* weights = ((int**)metrics)[0];
+    weight_t* weights = ((int**)metrics)[0];
     int* degrees = ((int**)metrics)[1];
-    return (weights[*(int*)a] * degrees[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b] * degrees[*(int*)b]);
+    return sign((weights[*(int*)a] * degrees[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b] * degrees[*(int*)b]));
 }
 
 int comp_crit_3(const void* a, const void* b, void* weights) {
-    return (((int*)weights)[*(int*)a]) - (((int*)weights)[*(int*)b]);
+    return sign((((weight_t*)weights)[*(int*)a]) - (((weight_t*)weights)[*(int*)b]));
 }
 
 void pop_complex_random (
     int graph_size, 
     const block_t *edges, 
-    const int *weights,
+    const weight_t *weights,
     int pop_size,
     block_t **population, 
     int max_color
@@ -1039,62 +1057,6 @@ void pop_complex_random (
                 SET_COLOR((*indiv)[rand()%max_color], current_vert);
         }
     }
-}
-
-
-bool read_graph (
-    const char* filename, 
-    int graph_size, 
-    block_t *edges, 
-    int offset_i
-) {
-    block_t (*edges_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])edges;
-    FILE *fp = fopen(filename, "r");
-    
-    if(fp == NULL)
-        return false;
-
-    memset(edges, 0, graph_size*TOTAL_BLOCK_NUM(graph_size)*sizeof(block_t));
-
-    char buffer[64];
-    char *token, *saveptr;
-    int row, column;
-    while(fgets(buffer, 64, fp) != NULL) {
-        buffer[strcspn(buffer, "\n")] = 0;
-
-        token = strtok_r (buffer, " ", &saveptr);
-        if(saveptr[0] == 0) 
-            break;
-        row = atoi(token) + offset_i;
-        token = strtok_r (NULL, " ", &saveptr);
-        column = atoi(token) + offset_i;
-
-        SET_EDGE(row, column, (*edges_p));
-    }
-    
-    fclose(fp);
-    return true;
-}
-
-
-bool read_weights(const char* filename, int graph_size, int weights[]) {
-    FILE *fp = fopen(filename, "r");
-    
-    if(fp == NULL)
-        return false;
-
-    memset(weights, 0, graph_size * sizeof(int));
-
-    char buffer[64];
-    int vertex = 0;
-    while(fgets(buffer, 64, fp) != NULL && vertex < graph_size) {
-        buffer[strcspn(buffer, "\n")] = 0;
-        weights[vertex] = atoi(buffer);
-        vertex++;
-    }
-    
-    fclose(fp);
-    return true;
 }
 
 
@@ -1168,33 +1130,6 @@ int count_edges(int graph_size, const block_t *edges, int degrees[]) {
     return total;
 }
 
-
-void print_colors(
-    const char *filename, 
-    const char *header, 
-    int color_num, 
-    int graph_size, 
-    const block_t *colors
-) {
-    const block_t (*colors_p)[][TOTAL_BLOCK_NUM(graph_size)] = (block_t (*)[][TOTAL_BLOCK_NUM(graph_size)])colors;
-
-    FILE* fresults;
-    fresults = fopen(filename, "w");
-
-    if(!fresults) {
-        printf("%s\ncould not print results, aborting ...\n", strerror(errno));
-        return;
-    }
-
-    fprintf(fresults, "%s\n\n", header);
-
-    for(int i = 0; i < color_num; i++)
-        for(int j = 0; j < graph_size; j++)
-            if(CHECK_COLOR((*colors_p)[i], j)) 
-                fprintf(fresults, "%d %d\n", i, j);
-
-    fclose(fresults);
-}
 
 
 bool exists(int* arr, int len, int target) {

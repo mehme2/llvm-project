@@ -12,6 +12,7 @@
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "iostream"
 #include "llvm/Support/CommandLine.h"
+#include <cassert>
 
 #include "RegAllocGraphSolvers.h"
 
@@ -30,6 +31,8 @@ static cl::opt<RAGraphUncoloredBehavior> UncoloredBehavior("uncolored-behavior",
                                                                       clEnumValN(RAGraphUncoloredBehavior::Split, "split", "Try to split first"),
                                                                       clEnumValN(RAGraphUncoloredBehavior::Greedy, "greedy", "Greedy allocator behavior")),
                                                            cl::init(RAGraphUncoloredBehavior::SpillOnly));
+
+static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::desc("unassign every virtual before reconstructing graph"));
 
 struct RAGreedy::RequiredAnalyses {
   VirtRegMap *VRM = nullptr;
@@ -232,17 +235,21 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
           if (PhysReg || (NewVRegs.size() - NewVRegSizeBefore))
               return PhysReg;
       }
+  }
 
-      // If we couldn't allocate a register from spilling, there is probably some
-      // invalid inline assembly. The base class will report it.
-      if (Stage >= RS_Done || !VirtReg.isSpillable()) {
-          /*
-             return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
-             RecolorStack, Depth);
-             */
-          //NewVRegs.push_back(VirtReg.reg());
-          return MCRegister();
+  // If we couldn't allocate a register from spilling, there is probably some
+  // invalid inline assembly. The base class will report it.
+  if ((Stage >= RS_Done || !VirtReg.isSpillable())) {
+      /*
+         return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
+         RecolorStack, Depth);
+         */
+      NewVRegs.push_back(VirtReg.reg());
+      for(Register Reg : NewVRegs)
+      {
+          RegAllocBase::enqueue(&LIS->getInterval(Reg));
       }
+      return MCRegister();
   }
 
   // Finally spill VirtReg itself.
@@ -289,9 +296,11 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           LIS->removeInterval(Interval->reg());
           //QueueBack.push_back(Interval);
       }
-      else if(VRM->hasPhys(Interval->reg()))
+      /*
+      else if((!Interval->reg().isVirtual()) || VRM->hasPhys(Interval->reg()))
       {
       }
+      */
       else
       {
           bool Exists = false;
@@ -365,6 +374,7 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           else
           {
               MCRegister PhysReg = onUnassigned(*Interval);
+              if(PhysReg) Matrix->assign(*Interval, PhysReg);
               ++NSpilled;
           }
       }
@@ -380,8 +390,10 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       VirtRegIndex < VirtRegCount;
       ++VirtRegIndex)
   {
-      Graph.setWeight(VirtRegIndex, VirtRegIntervals[VirtRegIndex]->weight());
-      Graph.setSpillable(VirtRegIndex, VirtRegIntervals[VirtRegIndex]->isSpillable());
+      auto *Interval = VirtRegIntervals[VirtRegIndex];
+      Graph.setWeight(VirtRegIndex, Interval->weight());
+      bool Spillable = (Interval->isSpillable() && (ExtraInfo->getStage(Interval->reg()) < RS_Done));
+      Graph.setSpillable(VirtRegIndex, Spillable);
   }
 
   for(unsigned PhysRegIndexA = 0;
@@ -412,8 +424,8 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       {
           unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtRegIndexB);
 
-          if(VirtRegIntervals[VirtRegIndexA]->empty() ||
-             VirtRegIntervals[VirtRegIndexB]->empty() ||
+          if(!(VirtRegIntervals[VirtRegIndexA]->empty() ||
+               VirtRegIntervals[VirtRegIndexB]->empty()) &&
              VirtRegIntervals[VirtRegIndexA]->overlaps(*VirtRegIntervals[VirtRegIndexB]))
           {
               Graph.addEdge(VertIndexA, VertIndexB);
@@ -500,15 +512,21 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           AllocationOrder Order =
               AllocationOrder::create(VirtReg->reg(), *VRM, RegClassInfo, Matrix);
 
+          bool IsAssigned = false;
+
           for(MCRegister PhysReg : Order)
           {
               if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
               {
+                  assert(PhysReg.isValid());
                   Matrix->assign(*VirtReg, PhysReg);
                   ++NAssigned;
+                  IsAssigned = true;
                   break;
               }
           }
+
+          assert(IsAssigned);
       }
   }
 
@@ -517,7 +535,7 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       ++VirtIndex)
   {
       const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
-      if(!VRM->hasPhys(VirtReg->reg()) && (Solution[VirtIndex] == -1))
+      if(Solution[VirtIndex] == -1)
       {
           /*
              RegAllocCounter::addSpillage(VirtReg);
@@ -527,11 +545,30 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           if(true || VirtReg->isSpillable())
           {
               MCRegister PhysReg = onUnassigned(*VirtReg);
+              if(PhysReg) Matrix->assign(*VirtReg, PhysReg);
               ++NSpilled;
           }
           else
           {
               RegAllocBase::enqueue(VirtReg);
+          }
+      }
+  }
+
+  if(UnassignUntilComplete && (NSpilled != 0))
+  {
+      for(unsigned VirtIndex = 0;
+          VirtIndex < VirtRegCount;
+          ++VirtIndex)
+      {
+          const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
+          if(Solution[VirtIndex] != -1)
+          {
+              if(VirtReg->reg().isVirtual() && VRM->hasPhys(VirtReg->reg()))
+              {
+                  Matrix->unassign(*VirtReg);
+                  RegAllocBase::enqueue(VirtReg);
+              }
           }
       }
   }

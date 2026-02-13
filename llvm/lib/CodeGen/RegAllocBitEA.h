@@ -4,6 +4,22 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
+#if defined(__cplusplus)
+extern "C" const float c_huge_valf;
+#else
+extern const float c_huge_valf;
+#endif
+
+#define BITEA_USE_FLOAT 1
+
+#if BITEA_USE_FLOAT
+#define weight_t float
+#define fitness_t double
+#else
+#define weight_t int32_t
+#define fitness_t int64_t
+#endif
+
 
 #define block_t uint64_t
 #define BLOCK_INDEX(bit_index)              ((bit_index)/(sizeof(block_t)*8))
@@ -53,7 +69,7 @@ int graph_color_greedy(
 void pop_complex_random (
     int graph_size, 
     const block_t *edges, 
-    const int *weights,
+    const weight_t *weights,
     int pop_size,
     block_t **population, 
     int max_color
@@ -87,12 +103,12 @@ int BitEA(
     int graph_size, 
     const block_t *edges, 
     const block_t *hints, 
-    int *weights, 
+    weight_t *weights, 
     int population_size,
     int base_color_count, 
     int max_gen_num, 
     block_t *best_solution, 
-    int64_t *best_fitness, 
+    fitness_t *best_fitness, 
     float *best_solution_time,
     int *uncolored_num
 );
@@ -128,7 +144,7 @@ void merge_and_fix(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     const block_t **parent_color,
     block_t *child_color,
     block_t *pool,
@@ -154,7 +170,7 @@ void fix_conflicts(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     int *conflict_count,
     int *total_conflicts,
     block_t *color,
@@ -167,7 +183,7 @@ void search_back(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     block_t *child, 
     int color_count,
     block_t *pool,
@@ -179,7 +195,7 @@ void local_search(
     int graph_size,
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     block_t *child, 
     int color_count,
     block_t *pool,
@@ -205,11 +221,11 @@ void local_search(
  * @param uncolored Output pointer to the number of uncolored vertices in the best solution.
  * @return Return the fitness of the new individual.
  */
-int64_t crossover (
+fitness_t crossover (
     int graph_size, 
     const block_t *edges, 
     const block_t *hints, 
-    const int *weights,
+    const weight_t *weights,
     int color_num1, 
     int color_num2, 
     const block_t *parent1, 
