@@ -231,5 +231,8 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
         }
     }
 
+    free(BEAMSolution.color_mat);
+    free(BEAMSolution.uncolored);
+
     return Solution;
 }

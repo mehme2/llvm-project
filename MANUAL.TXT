@@ -3,7 +3,8 @@ CONTENTS
 1 USAGE
 1.1 Wrapper Configuration
 1.2 BitEA Configuration
-1.3 Logging
+1.3 BEAM Configuration
+1.4 Logging
 
 2 SOURCE CODE
 2.1 Source Files
@@ -32,6 +33,9 @@ spill-only: Uncolored registers get spilled directly. The default value.
 split: Splitting will be tried before spilling.
 greedy: Uncolored registers will be handled according to greedy allocator's logic.
 
+The 'unassign-until-complete' flag allows unassigning every virtual
+before reconstructing the interference graph.
+
 
 
 1.2 BitEA Configuration
@@ -47,14 +51,29 @@ clang
 
 
 
-1.3 Logging
+1.3 BEAM Configuration
+
+
+Parameters of BEAM can be modified with custom llvm flags.
+
+clang
+-mllvm -regalloc=beam         -> Set the allocator
+-mllvm -beam-iterations=30000 -> Set iteration count
+-mllvm -beam-population=8     -> Set population
+-mllvm -beam-threads=4        -> Set thread count
+
+
+
+1.4 Logging
 
 
 During compilation status of allocation will be output to stdout like:
 
-core_bench_list -> Function name
-71/81, 10       -> First iteration in order: assigned virtual registers, total virtual registers, unassigned registers.
-44/44, 0        -> Second iteration
+core_bench_list       -> Function name
+Best Fitness: 28.4542 -> Fitness of first iteration (BitEA or BEAM)
+71/81, 10             -> First iteration in order: assigned virtual registers, total virtual registers, unassigned registers.
+Best Fitness: 103.839 -> Second iteration
+14/24, 10             -> Second iteration
 
 The values do not include extra assignments in greedy uncolored-behavior mode.
 
