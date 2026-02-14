@@ -5,6 +5,7 @@
 
 #define REGALLOC_GRAPH_SOLVER_TABLE \
 REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocBitEASolver, bitea) \
+REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocBEAMSolver, beam) \
 
 
 #define REGALLOC_GRAPH_SOLVER(Name) std::vector<int> Name(const RegInterferenceGraph &Graph)

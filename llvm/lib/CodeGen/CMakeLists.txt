@@ -188,6 +188,8 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocCounter.cpp
   RegAllocBitEA.cpp
   RegAllocBitEA.c
+  RegAllocBEAM.cpp
+  RegAllocBEAM.c
   RegInterferenceGraph.cpp
   RegAllocEvictionAdvisor.cpp
   RegAllocFast.cpp

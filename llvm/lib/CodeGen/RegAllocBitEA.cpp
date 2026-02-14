@@ -103,7 +103,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                 unsigned BitIndexA = (VertIndexA % WordBitCount);
                 if((BestSolution[WordsPerColor*ColorIndex + WordIndexA] & (1LL << BitIndexA)) == 0) continue;
                 fitness_t ConflictWeight = 0;
-                if(Graph.isHint(PhysIndex, VertIndexA))
+                if(UseHints && Graph.isHint(PhysIndex, VertIndexA))
                 {
                     ConflictWeight -= Weights[VertIndexA];
                 }
