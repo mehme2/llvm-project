@@ -243,6 +243,22 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
           }
           if (PhysReg || (NewVRegs.size() - NewVRegSizeBefore))
               return PhysReg;
+
+          LiveRangeStage NewStage = ExtraInfo->getStage(VirtReg);
+          if(NewStage == Stage)
+          {
+              LiveRangeStage StageToSet = RS_Done;
+              if(NewStage == RS_Split)
+              {
+                  StageToSet = RS_Split2;
+              }
+              if(NewStage == RS_Split2)
+              {
+                  StageToSet = RS_Spill;
+              }
+              ExtraInfo->setStage(VirtReg, StageToSet);
+          }
+          RegAllocBase::enqueue(&VirtReg);
           return MCRegister();
       }
   }
@@ -254,7 +270,7 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
          return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
          RecolorStack, Depth);
          */
-      if(ExtraInfo->getStage(VirtReg) < RS_Spill)
+      if(Stage < RS_Spill)
       {
           ExtraInfo->setStage(VirtReg, RS_Spill);
       }
