@@ -418,6 +418,17 @@ void RAGreedy::releaseMemory() {
 
 void RAGreedy::enqueueImpl(const LiveInterval *LI) { enqueue(Queue, LI); }
 
+static bool DuplicateCheck(std::priority_queue<std::pair<unsigned, unsigned>> &Queue, unsigned Val)
+{
+    if(Queue.empty()) return true;
+    if(~Val == Queue.top().second) return false;
+    std::pair<unsigned, unsigned> Top = Queue.top();
+    Queue.pop();
+    bool Result = DuplicateCheck(Queue, Val);
+    Queue.push(Top);
+    return Result;
+}
+
 void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   // Prioritize live ranges by size, assigning larger ranges first.
   // The queue holds (size, reg) pairs.
@@ -431,6 +442,8 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   }
 
   unsigned Ret = PriorityAdvisor->getPriority(*LI);
+
+  assert(DuplicateCheck(CurQueue, Reg.id()));
 
   // The virtual register number is a tie breaker for same-sized ranges.
   // Give lower vreg numbers higher priority to assign them first.

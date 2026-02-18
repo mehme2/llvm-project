@@ -241,8 +241,6 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
           {
               RegAllocBase::enqueue(&LIS->getInterval(Reg));
           }
-          if (PhysReg || (NewVRegs.size() - NewVRegSizeBefore))
-              return PhysReg;
 
           LiveRangeStage NewStage = ExtraInfo->getStage(VirtReg);
           if(NewStage == Stage)
@@ -258,9 +256,20 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
               }
               ExtraInfo->setStage(VirtReg, StageToSet);
           }
-          RegAllocBase::enqueue(&VirtReg);
+
+          if((NewVRegs.size() == NewVRegSizeBefore))
+          {
+              RegAllocBase::enqueue(&VirtReg);
+          }
+
           return MCRegister();
       }
+  }
+
+  if(VirtReg.empty())
+  {
+      ExtraInfo->setStage(VirtReg, RS_Done);
+      Stage = RS_Done;
   }
 
   // If we couldn't allocate a register from spilling, there is probably some
