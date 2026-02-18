@@ -34,6 +34,8 @@ static cl::opt<RAGraphUncoloredBehavior> UncoloredBehavior("uncolored-behavior",
 
 static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::desc("unassign every virtual before reconstructing graph"));
 
+static llvm::cl::opt<unsigned> RegallocSeed("regalloc-seed", llvm::cl::init(0), llvm::cl::Hidden, llvm::cl::desc("srand seed for every function's register allocation"));
+
 struct RAGreedy::RequiredAnalyses {
   VirtRegMap *VRM = nullptr;
   LiveIntervals *LIS = nullptr;
@@ -178,7 +180,14 @@ bool RAGraphInit::runOnMachineFunction(MachineFunction &MF) {
 RAGraph::RAGraph(const char *AlgoID, RequiredAnalyses &Analyses, RegAllocFilterFunc F)
     : RAGreedy(Analyses, F), AlgorithmID(AlgoID)
 {
-    srand(time(0));
+    if(RegallocSeed)
+    {
+        srand(RegallocSeed);
+    }
+    else
+    {
+        srand(time(0));
+    }
 }
 
 MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
@@ -239,11 +248,15 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
 
   // If we couldn't allocate a register from spilling, there is probably some
   // invalid inline assembly. The base class will report it.
-  if ((Stage >= RS_Done || !VirtReg.isSpillable())) {
+  if ((Stage != RS_Spill || !VirtReg.isSpillable())) {
       /*
          return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
          RecolorStack, Depth);
          */
+      if(ExtraInfo->getStage(VirtReg) < RS_Spill)
+      {
+          ExtraInfo->setStage(VirtReg, RS_Spill);
+      }
       NewVRegs.push_back(VirtReg.reg());
       for(Register Reg : NewVRegs)
       {
