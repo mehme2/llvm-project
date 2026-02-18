@@ -594,6 +594,8 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       }
   }
 
+  VRM->grow();
+
   if(UnassignUntilComplete && (NSpilled != 0))
   {
       for(unsigned VirtIndex = 0;
