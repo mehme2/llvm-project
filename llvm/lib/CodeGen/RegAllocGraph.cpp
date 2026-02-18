@@ -243,6 +243,7 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
           }
           if (PhysReg || (NewVRegs.size() - NewVRegSizeBefore))
               return PhysReg;
+          return MCRegister();
       }
   }
 
