@@ -12,6 +12,7 @@
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "iostream"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include <cassert>
 
 #include "RegAllocGraphSolvers.h"
@@ -320,10 +321,9 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
 bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
   std::vector<MCRegister> PhysRegs;
   std::vector<const LiveInterval *> VirtRegIntervals;
+  std::vector<Register> VirtRegs;
 
   ++IterationCount;
-
-  //Matrix->invalidateVirtRegs();
 
   while(true)
   {
@@ -333,13 +333,7 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       {
           aboutToRemoveInterval(*Interval);
           LIS->removeInterval(Interval->reg());
-          //QueueBack.push_back(Interval);
       }
-      /*
-      else if((!Interval->reg().isVirtual()) || VRM->hasPhys(Interval->reg()))
-      {
-      }
-      */
       else
       {
           bool Exists = false;
@@ -353,6 +347,7 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           if(!Exists)
           {
               VirtRegIntervals.push_back(Interval);
+              VirtRegs.push_back(Interval->reg());
           }
       }
   }
@@ -413,7 +408,7 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           else
           {
               MCRegister PhysReg = onUnassigned(*Interval);
-              if(PhysReg) Matrix->assign(*Interval, PhysReg);
+              //if(PhysReg) Matrix->assign(*Interval, PhysReg);
               ++NSpilled;
           }
       }
@@ -576,25 +571,10 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
       const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
       if(Solution[VirtIndex] == -1)
       {
-          /*
-             RegAllocCounter::addSpillage(VirtReg);
-             LiveRangeEdit LRE(VirtReg, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
-             spiller().spill(LRE);
-             */
-          if(true || VirtReg->isSpillable())
-          {
-              MCRegister PhysReg = onUnassigned(*VirtReg);
-              if(PhysReg) Matrix->assign(*VirtReg, PhysReg);
-              ++NSpilled;
-          }
-          else
-          {
-              RegAllocBase::enqueue(VirtReg);
-          }
+          MCRegister PhysReg = onUnassigned(*VirtReg);
+          ++NSpilled;
       }
   }
-
-  VRM->grow();
 
   if(UnassignUntilComplete && (NSpilled != 0))
   {
@@ -602,13 +582,14 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
           VirtIndex < VirtRegCount;
           ++VirtIndex)
       {
-          const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
           if(Solution[VirtIndex] != -1)
           {
-              if(VirtReg->reg().isVirtual() && VRM->hasPhys(VirtReg->reg()))
+              Register Reg = VirtRegs[VirtIndex];
+              if(Reg.isVirtual() && VRM->hasPhys(Reg))
               {
-                  Matrix->unassign(*VirtReg);
-                  RegAllocBase::enqueue(VirtReg);
+                  const LiveInterval &VirtReg = LIS->getInterval(Reg);
+                  Matrix->unassign(VirtReg);
+                  RegAllocBase::enqueue(&VirtReg);
               }
           }
       }

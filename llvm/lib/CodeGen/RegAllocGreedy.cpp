@@ -443,6 +443,7 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
 
   unsigned Ret = PriorityAdvisor->getPriority(*LI);
 
+  assert(Reg.virtRegIndex() < MRI->getNumVirtRegs());
   assert(DuplicateCheck(CurQueue, Reg.id()));
 
   // The virtual register number is a tie breaker for same-sized ranges.
