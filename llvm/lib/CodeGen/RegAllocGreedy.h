@@ -57,7 +57,7 @@ class TargetInstrInfo;
 class VirtRegMap;
 
 class LLVM_LIBRARY_VISIBILITY RAGreedy : public RegAllocBase,
-                                         private LiveRangeEdit::Delegate {
+                                         protected LiveRangeEdit::Delegate {
 public:
   struct RequiredAnalyses;
 
@@ -154,7 +154,7 @@ public:
   bool getReverseLocalAssignment() const { return ReverseLocalAssignment; }
   // end (interface to priority advisers)
 
-private:
+protected:
   // Convenient shortcuts.
   using PQueue = std::priority_queue<std::pair<unsigned, unsigned>>;
   using SmallLISet = SmallSetVector<const LiveInterval *, 4>;
@@ -300,7 +300,7 @@ public:
 
   void releaseMemory();
 
-private:
+protected:
   MCRegister selectOrSplitImpl(const LiveInterval &,
                                SmallVectorImpl<Register> &, SmallVirtRegSet &,
                                RecoloringStack &, unsigned = 0);

@@ -191,6 +191,13 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocGreedy.cpp
   RegAllocPBQP.cpp
   RegAllocPriorityAdvisor.cpp
+  RegAllocBEAM.c
+  RegAllocBEAM.cpp
+  RegAllocBitEA.c
+  RegAllocBitEA.cpp 
+  RegAllocCounter.cpp
+  RegAllocGraph.cpp
+  RegInterferenceGraph.cpp
   RegAllocScore.cpp
   RegisterClassInfo.cpp
   RegisterCoalescer.cpp
