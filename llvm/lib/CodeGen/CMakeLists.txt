@@ -198,6 +198,8 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocCounter.cpp
   RegAllocGraph.cpp
   RegInterferenceGraph.cpp
+  RegisterSplitter.cpp
+  ExtraRegInfo.cpp
   RegAllocScore.cpp
   RegisterClassInfo.cpp
   RegisterCoalescer.cpp

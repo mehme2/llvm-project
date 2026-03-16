@@ -13,6 +13,7 @@
 #include "iostream"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "RegisterSplitter.h"
 #include <cassert>
 
 #include "RegAllocGraphSolvers.h"
@@ -170,6 +171,8 @@ private:
   std::string AlgorithmID;
 
   MachineFunction *MF;
+
+  RegisterSplitter *Splitter = nullptr;
 };
 
 bool RAGraphInit::runOnMachineFunction(MachineFunction &MF) {
@@ -193,7 +196,6 @@ RAGraph::RAGraph(const char *AlgoID, RequiredAnalyses &Analyses, RegAllocFilterF
 
 MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
 {
-
   SmallVirtRegSet FixedRegisters;
   using VirtRegVec = SmallVector<Register, 4>;
   VirtRegVec NewVRegs;
@@ -237,7 +239,7 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
       if (Stage < RS_Spill && !VirtReg.empty()) {
           // Try splitting VirtReg or interferences.
           unsigned NewVRegSizeBefore = NewVRegs.size();
-          MCRegister PhysReg = trySplit(VirtReg, Order, NewVRegs, FixedRegisters);
+          MCRegister PhysReg = Splitter->trySplit(VirtReg, Order, NewVRegs, FixedRegisters);
           for(Register Reg : NewVRegs)
           {
               RegAllocBase::enqueue(&LIS->getInterval(Reg));
@@ -324,6 +326,31 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
   std::vector<Register> VirtRegs;
 
   ++IterationCount;
+
+  if(!Splitter)
+  {
+      Splitter = new RegisterSplitter((llvm::ExtraRegInfo *)&ExtraInfo.value(),
+                                      LIS,
+                                      SA.get(),
+                                      SE.get(),
+                                      TRI,
+                                      MF,
+                                      SpillPlacer,
+                                      Bundles,
+                                      Indexes,
+                                      Loops,
+                                      MBFI,
+                                      EvictAdvisor.get(),
+                                      VRM,
+                                      this,
+                                      &RegClassInfo,
+                                      MRI,
+                                      DebugVars,
+                                      Matrix,
+                                      TII,
+                                      &DeadRemats
+                                     );
+  }
 
   while(true)
   {
@@ -633,6 +660,11 @@ bool RAGraph::run(MachineFunction &mf)
   IterationCount = 0;
 
   return RAGreedy::run(mf);
+
+  if(Splitter)
+  {
+      delete Splitter;
+  }
 }
 
 }
