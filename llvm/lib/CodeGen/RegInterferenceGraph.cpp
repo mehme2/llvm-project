@@ -55,11 +55,8 @@ void RegInterferenceGraph::addHint(unsigned VertexIndexA, unsigned VertexIndexB)
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
     unsigned BitIndexB = VertexIndexB & AdjacencyBitMask;
 
-    if(!isPhys(VertexIndexA))
-        HintAdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] |= (1LL << BitIndexB);
-
-    if(!isPhys(VertexIndexB))
-        HintAdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] |= (1LL << BitIndexA);
+    HintAdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] |= (1LL << BitIndexB);
+    HintAdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] |= (1LL << BitIndexA);
 }
 
 bool RegInterferenceGraph::isHint(unsigned VertexIndexA, unsigned VertexIndexB) const

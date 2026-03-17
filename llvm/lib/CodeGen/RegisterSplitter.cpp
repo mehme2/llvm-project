@@ -39,7 +39,6 @@ RegisterSplitter::RegisterSplitter(
     SlotIndexes *_Indexes,
     MachineLoopInfo *_Loops,
     MachineBlockFrequencyInfo *_MBFI,
-    RegAllocEvictionAdvisor *_EvictAdvisor,
     VirtRegMap *_VRM,
     LiveRangeEdit::Delegate *_LREDelegate,
     RegisterClassInfo *_RegClassInfo,
@@ -61,7 +60,6 @@ RegisterSplitter::RegisterSplitter(
     Indexes = _Indexes;
     Loops = _Loops;
     MBFI = _MBFI;
-    EvictAdvisor = _EvictAdvisor;
     VRM = _VRM;
     LREDelegate = _LREDelegate;
     RegClassInfo = _RegClassInfo;
@@ -223,7 +221,15 @@ unsigned RegisterSplitter::calculateRegionSplitCost(const LiveInterval &VirtReg,
   unsigned BestCand = NoCand;
   for (MCRegister PhysReg : Order) {
     assert(PhysReg);
-    if (IgnoreCSR && EvictAdvisor->isUnusedCalleeSavedReg(PhysReg))
+
+    bool IsUnusedCalleeSavedReg = false;
+    MCRegister CSR = RegClassInfo->getLastCalleeSavedAlias(PhysReg);
+    if (CSR)
+    {
+        IsUnusedCalleeSavedReg =  !Matrix->isPhysRegUsed(PhysReg);
+    }
+
+    if (IgnoreCSR && IsUnusedCalleeSavedReg)
       continue;
 
     calculateRegionSplitCostAroundReg(PhysReg, Order, BestCost, NumCands,

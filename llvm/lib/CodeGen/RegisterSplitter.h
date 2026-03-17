@@ -62,7 +62,6 @@ class RegisterSplitter
     SlotIndexes *Indexes = nullptr;
     MachineLoopInfo *Loops = nullptr;
     MachineBlockFrequencyInfo *MBFI = nullptr;
-    RegAllocEvictionAdvisor *EvictAdvisor = nullptr;
     VirtRegMap *VRM = nullptr;
     LiveRangeEdit::Delegate *LREDelegate = nullptr;
     RegisterClassInfo *RegClassInfo = nullptr;
@@ -136,7 +135,6 @@ public:
         SlotIndexes *_Indexes,
         MachineLoopInfo *_Loops,
         MachineBlockFrequencyInfo *_MBFI,
-        RegAllocEvictionAdvisor *_EvictAdvisor,
         VirtRegMap *_VRM,
         LiveRangeEdit::Delegate *_LREDelegate,
         RegisterClassInfo *_RegClassInfo,

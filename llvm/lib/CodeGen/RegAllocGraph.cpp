@@ -150,40 +150,74 @@ INITIALIZE_PASS_DEPENDENCY(RegAllocPriorityAdvisorAnalysisLegacy)
 INITIALIZE_PASS_END(RAGraphInit, "graph", "Graph Register Allocator",
                     false, false)
 
-class RAGraph : public RAGreedy
+class RAGraph : private LiveRangeEdit::Delegate
 {
+    MachineFunction *MF = nullptr;
+    const TargetInstrInfo *TII = nullptr;
+    MachineRegisterInfo *MRI = nullptr;
+    VirtRegMap *VRM = nullptr;
+    LiveIntervals *LIS = nullptr;
+    LiveRegMatrix *Matrix = nullptr;
+    const TargetRegisterInfo *TRI = nullptr;
+    LiveDebugVariables *DebugVars = nullptr;
+    SlotIndexes *Indexes = nullptr;
+    LiveStacks *LSS = nullptr;
+    MachineDominatorTree *DomTree = nullptr;
+    MachineBlockFrequencyInfo *MBFI = nullptr;
+    VirtRegAuxInfo *VRAI = nullptr;
+    MachineLoopInfo *Loops = nullptr;
+    SpillPlacement *SpillPlacer = nullptr;
+    EdgeBundles *Bundles = nullptr;
+    SplitAnalysis *SA = nullptr;
+    SplitEditor *SE = nullptr;
+    RegisterSplitter *Splitter = nullptr;
+    Spiller *SpillerInstance = nullptr;
+
+    /// Inst which is a def of an original reg and whose defs are already all
+    /// dead after remat is saved in DeadRemats. The deletion of such inst is
+    /// postponed till all the allocations are done, so its remat expr is
+    /// always available for the remat of all the siblings of the original reg.
+    SmallPtrSet<MachineInstr *, 32> DeadRemats;
+
+    ExtraRegInfo *ExtraInfo;
+
+    RegisterClassInfo RegClassInfo;
+
+    std::string AlgorithmID;
+
+    bool iterate();
+
+    bool LRE_CanEraseVirtReg(Register) override;
+    void LRE_WillShrinkVirtReg(Register) override;
+    void LRE_DidCloneVirtReg(Register, Register) override;
+
 public:
-  RAGraph(const char *ID, RequiredAnalyses &Analyses, const RegAllocFilterFunc F = nullptr);
-
-  MCRegister selectOrSplit(const LiveInterval &VirtReg,
-                           SmallVectorImpl<Register> &SplitVRegs) override;
-
-  bool run(MachineFunction &mf);
-
-private:
-  bool iterateSolution(SmallVectorImpl<Register> &SplitVRegs);
-
-  MCRegister onUnassigned(const LiveInterval &VirtReg);
-
-  bool StopAlgorithm;
-  int IterationCount;
-
-  std::string AlgorithmID;
-
-  MachineFunction *MF;
-
-  RegisterSplitter *Splitter = nullptr;
+    RAGraph(const char *ID, Pass *P, const RegAllocFilterFunc F = nullptr);
+    bool run(MachineFunction &mf);
+    void onUnassigned(Register VirtReg);
 };
 
 bool RAGraphInit::runOnMachineFunction(MachineFunction &MF) {
-  RAGreedy::RequiredAnalyses Analyses(*this);
-  RAGraph Impl(AlgorithmID, Analyses, F);
+  RAGraph Impl(AlgorithmID, this, F);
   return Impl.run(MF);
 }
 
-RAGraph::RAGraph(const char *AlgoID, RequiredAnalyses &Analyses, RegAllocFilterFunc F)
-    : RAGreedy(Analyses, F), AlgorithmID(AlgoID)
+RAGraph::RAGraph(const char *ID, Pass *P, const RegAllocFilterFunc F)
 {
+    AlgorithmID = ID;
+
+    VRM = &P->getAnalysis<VirtRegMapWrapperLegacy>().getVRM();
+    LIS = &P->getAnalysis<LiveIntervalsWrapperPass>().getLIS();
+    Matrix = &P->getAnalysis<LiveRegMatrixWrapperLegacy>().getLRM();
+    DebugVars = &P->getAnalysis<LiveDebugVariablesWrapperLegacy>().getLDV();
+    Indexes = &P->getAnalysis<SlotIndexesWrapperPass>().getSI();
+    LSS = &P->getAnalysis<LiveStacksWrapperLegacy>().getLS();
+    DomTree = &P->getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
+    MBFI = &P->getAnalysis<MachineBlockFrequencyInfoWrapperPass>().getMBFI();
+    Loops = &P->getAnalysis<MachineLoopInfoWrapperPass>().getLI();
+    SpillPlacer = &P->getAnalysis<SpillPlacementWrapperLegacy>().getResult();
+    Bundles = &P->getAnalysis<EdgeBundlesWrapperLegacy>().getEdgeBundles();
+
     if(RegallocSeed)
     {
         srand(RegallocSeed);
@@ -194,14 +228,45 @@ RAGraph::RAGraph(const char *AlgoID, RequiredAnalyses &Analyses, RegAllocFilterF
     }
 }
 
-MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
+bool RAGraph::LRE_CanEraseVirtReg(Register VirtReg) {
+  LiveInterval &LI = LIS->getInterval(VirtReg);
+  if (VRM->hasPhys(VirtReg)) {
+    Matrix->unassign(LI);
+    return true;
+  }
+  // Unassigned virtreg is probably in the priority queue.
+  // RegAllocBase will erase it after dequeueing.
+  // Nonetheless, clear the live-range so that the debug
+  // dump will show the right state for that VirtReg.
+  LI.clear();
+  return false;
+}
+
+void RAGraph::LRE_WillShrinkVirtReg(Register VirtReg) {
+  if (!VRM->hasPhys(VirtReg))
+    return;
+
+  // Register is assigned, put it back on the queue for reassignment.
+  LiveInterval &LI = LIS->getInterval(VirtReg);
+  Matrix->unassign(LI);
+}
+
+void RAGraph::LRE_DidCloneVirtReg(Register New, Register Old) {
+  ExtraInfo->LRE_DidCloneVirtReg(New, Old);
+}
+
+void RAGraph::onUnassigned(Register VirtReg)
 {
   SmallVirtRegSet FixedRegisters;
   using VirtRegVec = SmallVector<Register, 4>;
   VirtRegVec NewVRegs;
 
+  LiveInterval *Interval = &LIS->getInterval(VirtReg);
+
   if(UncoloredBehavior == RAGraphUncoloredBehavior::Greedy)
   {
+      assert("greedy option unsupported");
+      /*
       MCRegister PhysReg = RAGreedy::selectOrSplit(VirtReg, NewVRegs);
       if(PhysReg && (PhysReg != ~0u))
       {
@@ -217,10 +282,10 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
           RegAllocBase::enqueue(&LIS->getInterval(Reg));
       }
       return MCRegister();
+      */
   }
 
-  auto Order =
-      AllocationOrder::create(VirtReg.reg(), *VRM, RegClassInfo, Matrix);
+  auto Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
 
   LiveRangeStage Stage = ExtraInfo->getStage(VirtReg);
 
@@ -232,18 +297,12 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
       if (Stage < RS_Split) {
           ExtraInfo->setStage(VirtReg, RS_Split);
           //LLVM_DEBUG(dbgs() << "wait for second round\n");
-          RegAllocBase::enqueue(&VirtReg);
-          return MCRegister();
+          return;
       }
 
-      if (Stage < RS_Spill && !VirtReg.empty()) {
+      if (Stage < RS_Spill && !Interval->empty()) {
           // Try splitting VirtReg or interferences.
-          unsigned NewVRegSizeBefore = NewVRegs.size();
-          MCRegister PhysReg = Splitter->trySplit(VirtReg, Order, NewVRegs, FixedRegisters);
-          for(Register Reg : NewVRegs)
-          {
-              RegAllocBase::enqueue(&LIS->getInterval(Reg));
-          }
+          MCRegister PhysReg = Splitter->trySplit(*Interval, Order, NewVRegs, FixedRegisters);
 
           LiveRangeStage NewStage = ExtraInfo->getStage(VirtReg);
           if(NewStage == Stage)
@@ -260,16 +319,11 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
               ExtraInfo->setStage(VirtReg, StageToSet);
           }
 
-          if((NewVRegs.size() == NewVRegSizeBefore))
-          {
-              RegAllocBase::enqueue(&VirtReg);
-          }
-
-          return MCRegister();
+          return;
       }
   }
 
-  if(VirtReg.empty())
+  if(Interval->empty())
   {
       ExtraInfo->setStage(VirtReg, RS_Done);
       Stage = RS_Done;
@@ -277,7 +331,7 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
 
   // If we couldn't allocate a register from spilling, there is probably some
   // invalid inline assembly. The base class will report it.
-  if ((Stage != RS_Spill || !VirtReg.isSpillable())) {
+  if ((Stage != RS_Spill) || (!Interval->isSpillable())) {
       /*
          return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
          RecolorStack, Depth);
@@ -286,110 +340,81 @@ MCRegister RAGraph::onUnassigned(const LiveInterval &VirtReg)
       {
           ExtraInfo->setStage(VirtReg, RS_Spill);
       }
-      NewVRegs.push_back(VirtReg.reg());
-      for(Register Reg : NewVRegs)
-      {
-          RegAllocBase::enqueue(&LIS->getInterval(Reg));
-      }
-      return MCRegister();
+      return;
   }
 
   // Finally spill VirtReg itself.
+  /*
   NamedRegionTimer T("spill", "Spiller", TimerGroupName,
                      TimerGroupDescription, TimePassesIsEnabled);
-  RegAllocCounter::addSpillage(&VirtReg);
-  LiveRangeEdit LRE(&VirtReg, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
-  spiller().spill(LRE, &Order);
+                     */
+  std::cout << "Spilling " << VirtReg << std::endl;
+  RegAllocCounter::addSpillage(Interval);
+  LiveRangeEdit LRE(Interval, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
+  SpillerInstance->spill(LRE, &Order);
   ExtraInfo->setStage(NewVRegs.begin(), NewVRegs.end(), RS_Done);
 
   // Tell LiveDebugVariables about the new ranges. Ranges not being covered by
   // the new regs are kept in LDV (still mapping to the old register), until
   // we rewrite spilled locations in LDV at a later stage.
-  for (Register r : spiller().getSpilledRegs())
+  for (Register r : SpillerInstance->getSpilledRegs())
     DebugVars->splitRegister(r, LRE.regs(), *LIS);
-  for (Register r : spiller().getReplacedRegs())
+  for (Register r : SpillerInstance->getReplacedRegs())
     DebugVars->splitRegister(r, LRE.regs(), *LIS);
 
-  if (VerifyEnabled)
+  if (RegAllocBase::VerifyEnabled)
     MF->verify(LIS, Indexes, "After spilling", &errs());
-
-  for(Register Reg : NewVRegs)
-  {
-      RegAllocBase::enqueue(&LIS->getInterval(Reg));
-  }
-  return MCRegister();
 }
 
-bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
-  std::vector<MCRegister> PhysRegs;
-  std::vector<const LiveInterval *> VirtRegIntervals;
-  std::vector<Register> VirtRegs;
+bool RAGraph::iterate()
+{
+    Matrix->invalidateVirtRegs();
+    unsigned AllVirtRegs = MRI->getNumVirtRegs();
 
-  ++IterationCount;
+    std::vector<Register> VirtRegsToAssign;
+    for(unsigned VirtIndex = 0;
+        VirtIndex < AllVirtRegs;
+        ++VirtIndex)
+    {
+        Register VirtReg = Register::index2VirtReg(VirtIndex);
+        if(!VirtReg.isValid() || !VirtReg.isVirtual())
+        {
+        }
+        else if(MRI->reg_nodbg_empty(VirtReg))
+        {
+            /*
+            if(LIS->hasInterval(VirtReg))
+            {
+                LIS->removeInterval(VirtReg);
+            }
+            */
+        }
+        else if(!VRM->hasPhys(VirtReg))
+        {
+            auto Stage = ExtraInfo->getOrInitStage(VirtReg);
+            if (Stage == RS_New) {
+                Stage = RS_Assign;
+                ExtraInfo->setStage(VirtReg, Stage);
+            }
+            VirtRegsToAssign.push_back(VirtReg);
+        }
+    }
 
-  if(!Splitter)
-  {
-      Splitter = new RegisterSplitter((llvm::ExtraRegInfo *)&ExtraInfo.value(),
-                                      LIS,
-                                      SA.get(),
-                                      SE.get(),
-                                      TRI,
-                                      MF,
-                                      SpillPlacer,
-                                      Bundles,
-                                      Indexes,
-                                      Loops,
-                                      MBFI,
-                                      EvictAdvisor.get(),
-                                      VRM,
-                                      this,
-                                      &RegClassInfo,
-                                      MRI,
-                                      DebugVars,
-                                      Matrix,
-                                      TII,
-                                      &DeadRemats
-                                     );
-  }
+    unsigned VirtRegCount = VirtRegsToAssign.size();
 
-  while(true)
-  {
-      const LiveInterval *Interval = dequeue();
-      if(!Interval) break;
-      if(MRI->reg_nodbg_empty(Interval->reg()))
-      {
-          aboutToRemoveInterval(*Interval);
-          LIS->removeInterval(Interval->reg());
-      }
-      else
-      {
-          bool Exists = false;
-          for(auto *Test : VirtRegIntervals)
-          {
-              if(Test == Interval)
-              {
-                  Exists = true;
-              }
-          }
-          if(!Exists)
-          {
-              VirtRegIntervals.push_back(Interval);
-              VirtRegs.push_back(Interval->reg());
-          }
-      }
-  }
+    std::cout << "VirtRegCount: " << VirtRegCount << std::endl;
 
-  if(VirtRegIntervals.empty()) return true;
+    if(VirtRegCount == 0) return false;
 
-  for(const LiveInterval *Interval : VirtRegIntervals)
-  {
-      Register VirtReg = Interval->reg();
+    std::vector<MCRegister> PhysRegs;
+    for(Register VirtReg : VirtRegsToAssign)
+    {
+        AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
 
-      AllocationOrder PhysRegsToAdd =
-          AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
 
-      for(MCRegister PhysRegToAdd : PhysRegsToAdd)
-      {
+        for(MCRegister PhysRegToAdd : Order)
+        {
           if(Matrix->checkInterference(*Interval, PhysRegToAdd) ==
              LiveRegMatrix::IK_Free)
           {
@@ -414,257 +439,265 @@ bool RAGraph::iterateSolution(SmallVectorImpl<Register> &SplitVRegs) {
               if(!Exists)
               {
                   PhysRegs.push_back(SuperRegister);
-                  //PhysRegNames.push_back(TRI->getName(SuperRegister));
               }
           }
-      }
-  }
+        }
+    }
 
-  unsigned PhysRegCount = PhysRegs.size();
-  unsigned VirtRegCount = VirtRegIntervals.size();
+    unsigned PhysRegCount = PhysRegs.size();
 
-  if(PhysRegCount == 0)
-  {
-      int NSpilled = 0;
-      for(const LiveInterval *Interval : VirtRegIntervals)
-      {
-          if(false && !Interval->isSpillable())
-          {
-              RegAllocBase::enqueue(Interval);
-          }
-          else
-          {
-              MCRegister PhysReg = onUnassigned(*Interval);
-              //if(PhysReg) Matrix->assign(*Interval, PhysReg);
-              ++NSpilled;
-          }
-      }
+    if(PhysRegCount == 0)
+    {
+        for(Register VirtReg : VirtRegsToAssign)
+        {
+            onUnassigned(VirtReg);
+        }
 
-      //std::cout << VirtRegIntervals.size() << "!" << std::endl;
+        return true;
+    }
 
-      return (NSpilled != 0);
-  }
+    RegInterferenceGraph Graph(PhysRegCount, VirtRegCount);
 
-  RegInterferenceGraph Graph(PhysRegCount, VirtRegCount);
+    for(unsigned VirtRegIndex = 0;
+        VirtRegIndex < VirtRegCount;
+        ++VirtRegIndex)
+    {
+        Register VirtReg = VirtRegsToAssign[VirtRegIndex];
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+        Graph.setWeight(VirtRegIndex, Interval->weight());
+        bool Spillable = (Interval->isSpillable() && (ExtraInfo->getStage(VirtReg) < RS_Done));
+        Graph.setSpillable(VirtRegIndex, Spillable);
+    }
 
-  for(unsigned VirtRegIndex = 0;
-      VirtRegIndex < VirtRegCount;
-      ++VirtRegIndex)
-  {
-      auto *Interval = VirtRegIntervals[VirtRegIndex];
-      Graph.setWeight(VirtRegIndex, Interval->weight());
-      bool Spillable = (Interval->isSpillable() && (ExtraInfo->getStage(Interval->reg()) < RS_Done));
-      Graph.setSpillable(VirtRegIndex, Spillable);
-  }
+    for(unsigned PhysRegIndexA = 0;
+        PhysRegIndexA < PhysRegCount;
+        ++PhysRegIndexA)
+    {
+        unsigned VertIndexA = Graph.physIndexToVertIndex(PhysRegIndexA);
 
-  for(unsigned PhysRegIndexA = 0;
-      PhysRegIndexA < PhysRegCount;
-      ++PhysRegIndexA)
-  {
-      unsigned VertIndexA = Graph.physIndexToVertIndex(PhysRegIndexA);
+        for(unsigned PhysRegIndexB = PhysRegIndexA + 1;
+            PhysRegIndexB < PhysRegCount;
+            ++PhysRegIndexB)
+        {
+            unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndexB);
 
-      for(unsigned PhysRegIndexB = PhysRegIndexA + 1;
-          PhysRegIndexB < PhysRegCount;
-          ++PhysRegIndexB)
-      {
-          unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndexB);
+            Graph.addEdge(VertIndexA, VertIndexB);
+        }
+    }
 
-          Graph.addEdge(VertIndexA, VertIndexB);
-      }
-  }
+    for(unsigned VirtRegIndexA = 0;
+        VirtRegIndexA < VirtRegCount;
+        ++VirtRegIndexA)
+    {
+        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndexA);
 
-  for(unsigned VirtRegIndexA = 0;
-      VirtRegIndexA < VirtRegCount;
-      ++VirtRegIndexA)
-  {
-      unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndexA);
+        for(unsigned VirtRegIndexB = VirtRegIndexA + 1;
+            VirtRegIndexB < VirtRegCount;
+            ++VirtRegIndexB)
+        {
+            unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtRegIndexB);
 
-      for(unsigned VirtRegIndexB = VirtRegIndexA + 1;
-          VirtRegIndexB < VirtRegCount;
-          ++VirtRegIndexB)
-      {
-          unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtRegIndexB);
+            LiveInterval *IntervalA = &LIS->getInterval(VirtRegsToAssign[VirtRegIndexA]);
+            LiveInterval *IntervalB = &LIS->getInterval(VirtRegsToAssign[VirtRegIndexB]);
 
-          if(!(VirtRegIntervals[VirtRegIndexA]->empty() ||
-               VirtRegIntervals[VirtRegIndexB]->empty()) &&
-             VirtRegIntervals[VirtRegIndexA]->overlaps(*VirtRegIntervals[VirtRegIndexB]))
-          {
-              Graph.addEdge(VertIndexA, VertIndexB);
-          }
-      }
-  }
+            if(!(IntervalA->empty() || IntervalB->empty()) &&
+               IntervalA->overlaps(*IntervalB))
+            {
+                Graph.addEdge(VertIndexA, VertIndexB);
+            }
+        }
+    }
 
-  for(unsigned VirtRegIndex = 0;
-      VirtRegIndex < VirtRegCount;
-      ++VirtRegIndex)
-  {
-      unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndex);
+    for(unsigned VirtRegIndex = 0;
+        VirtRegIndex < VirtRegCount;
+        ++VirtRegIndex)
+    {
+        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndex);
 
-      for(unsigned PhysRegIndex = 0;
-          PhysRegIndex < PhysRegCount;
-          ++PhysRegIndex)
-      {
-          bool CanAssign = false;
-          bool IsHint = false;
+        for(unsigned PhysRegIndex = 0;
+            PhysRegIndex < PhysRegCount;
+            ++PhysRegIndex)
+        {
+            bool CanAssign = false;
+            bool IsHint = false;
 
-          AllocationOrder PhysRegsAvailable = AllocationOrder::create(VirtRegIntervals[VirtRegIndex]->reg(),
-                                                                      *VRM, RegClassInfo, Matrix);
-          for(MCRegister PhysReg : PhysRegsAvailable)
-          {
-              if(TRI->isSuperRegisterEq(PhysReg, PhysRegs[PhysRegIndex]))
-              {
-                  if(Matrix->checkInterference(*VirtRegIntervals[VirtRegIndex], PhysReg) ==
-                     LiveRegMatrix::IK_Free)
-                  {
-                      if(PhysRegsAvailable.isHint(PhysReg))
-                      {
-                          IsHint = true;
-                      }
+            Register VirtReg = VirtRegsToAssign[VirtRegIndex];
+            LiveInterval *Interval = &LIS->getInterval(VirtReg);
 
-                      CanAssign = true;
-                      break;
-                  }
-              }
-          }
+            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+            for(MCRegister PhysReg : Order)
+            {
+                if(TRI->isSuperRegisterEq(PhysReg, PhysRegs[PhysRegIndex]))
+                {
+                    if(Matrix->checkInterference(*Interval, PhysReg) == LiveRegMatrix::IK_Free)
+                    {
+                        if(Order.isHint(PhysReg))
+                        {
+                            IsHint = true;
+                        }
 
-          if(!CanAssign)
-          {
-              unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndex);
+                        CanAssign = true;
+                        break;
+                    }
+                }
+            }
 
-              Graph.addEdge(VertIndexA, VertIndexB);
+            if(!CanAssign)
+            {
+                unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndex);
 
-              if(IsHint)
-              {
-                  Graph.addHint(VertIndexA, VertIndexB);
-              }
-          }
-      }
-  }
+                Graph.addEdge(VertIndexA, VertIndexB);
 
-#if 0
-  if(IterationCount == 1)
-  {
-      std::string ModuleName = MF->getFunction().getParent()->getName().str();
-      Graph.saveAs(ModuleName + "_" + MF->getName().str());
-  }
-#endif
+                if(IsHint)
+                {
+                    Graph.addHint(VertIndexA, VertIndexB);
+                }
+            }
+        }
+    }
 
-  regalloc_graph_solver *Solver = RegAllocBitEASolver;
+    regalloc_graph_solver *Solver = RegAllocBitEASolver;
 
 #define REGALLOC_GRAPH_SOLVER_ENTRY(Name, ID) \
-  if(AlgorithmID == #ID) Solver = Name;
-  REGALLOC_GRAPH_SOLVER_TABLE
+    if(AlgorithmID == #ID) Solver = Name;
+    REGALLOC_GRAPH_SOLVER_TABLE
 #undef REGALLOC_GRAPH_SOLVER_ENTRY
 
-  std::vector<int> Solution = Solver(Graph);
+    std::vector<int> Solution = Solver(Graph);
 
-  unsigned NSpilled = 0;
-  unsigned NAssigned = 0;
+    unsigned NUncolored = 0;
+    unsigned NAssigned = 0;
 
-  for(unsigned VirtIndex = 0;
-      VirtIndex < VirtRegCount;
-      ++VirtIndex)
-  {
-      const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
-      if(Solution[VirtIndex] != -1)
-      {
-          MCRegister SuperReg = PhysRegs[Solution[VirtIndex]];
+    for(unsigned VirtIndex = 0;
+        VirtIndex < VirtRegCount;
+        ++VirtIndex)
+    {
+        Register VirtReg = VirtRegsToAssign[VirtIndex];
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+        if(Solution[VirtIndex] != -1)
+        {
+            MCRegister SuperReg = PhysRegs[Solution[VirtIndex]];
 
-          AllocationOrder Order =
-              AllocationOrder::create(VirtReg->reg(), *VRM, RegClassInfo, Matrix);
+            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
 
-          bool IsAssigned = false;
+            bool IsAssigned = false;
 
-          for(MCRegister PhysReg : Order)
-          {
-              if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
-              {
-                  assert(PhysReg.isValid());
-                  Matrix->assign(*VirtReg, PhysReg);
-                  ++NAssigned;
-                  IsAssigned = true;
-                  break;
-              }
-          }
+            for(MCRegister PhysReg : Order)
+            {
+                if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
+                {
+                    assert(PhysReg.isValid());
+                    Matrix->assign(*Interval, PhysReg);
+                    ++NAssigned;
+                    IsAssigned = true;
+                    break;
+                }
+            }
 
-          assert(IsAssigned);
-      }
-  }
+            assert(IsAssigned);
+        }
+    }
 
-  for(unsigned VirtIndex = 0;
-      VirtIndex < VirtRegCount;
-      ++VirtIndex)
-  {
-      const LiveInterval *VirtReg = VirtRegIntervals[VirtIndex];
-      if(Solution[VirtIndex] == -1)
-      {
-          MCRegister PhysReg = onUnassigned(*VirtReg);
-          ++NSpilled;
-      }
-  }
+    for(unsigned VirtIndex = 0;
+        VirtIndex < VirtRegCount;
+        ++VirtIndex)
+    {
+        if(Solution[VirtIndex] == -1)
+        {
+            Register VirtReg = VirtRegsToAssign[VirtIndex];
+            onUnassigned(VirtReg);
+            ++NUncolored;
+        }
+    }
 
-  if(UnassignUntilComplete && (NSpilled != 0))
-  {
-      for(unsigned VirtIndex = 0;
-          VirtIndex < VirtRegCount;
-          ++VirtIndex)
-      {
-          if(Solution[VirtIndex] != -1)
-          {
-              Register Reg = VirtRegs[VirtIndex];
-              if(Reg.isVirtual() && VRM->hasPhys(Reg))
-              {
-                  const LiveInterval &VirtReg = LIS->getInterval(Reg);
-                  Matrix->unassign(VirtReg);
-                  RegAllocBase::enqueue(&VirtReg);
-              }
-          }
-      }
-  }
+    if(UnassignUntilComplete && (NUncolored != 0))
+    {
+        for(unsigned VirtIndex = 0;
+            VirtIndex < VirtRegCount;
+            ++VirtIndex)
+        {
+            if(Solution[VirtIndex] != -1)
+            {
+                Register VirtReg = VirtRegsToAssign[VirtIndex];
+                if(VRM->hasPhys(VirtReg))
+                {
+                    LiveInterval *Interval = &LIS->getInterval(VirtReg);
+                    Matrix->unassign(*Interval);
+                }
+            }
+        }
+    }
 
-  std::cout << NAssigned << "/" << VirtRegCount << ", " << NSpilled << std::endl;
+    std::cout << NAssigned << "/" << VirtRegCount << std::endl;
 
-  RegAllocCounter::count(MRI, LIS, VRM);
+    RegAllocCounter::count(MRI, LIS, VRM);
 
-  return ((NSpilled != 0) || (NAssigned != 0));
-}
+    if (RegAllocBase::VerifyEnabled)
+        MF->verify(LIS, Indexes, "After iteration", &errs());
 
-MCRegister RAGraph::selectOrSplit(const LiveInterval &VirtReg,
-                                  SmallVectorImpl<Register> &SplitVRegs) {
-  if(!StopAlgorithm)
-  {
-      RegAllocBase::enqueue(&VirtReg);
-      if(iterateSolution(SplitVRegs))
-          return 0;
-
-      std::cout << "Stop" << std::endl;
-  }
-
-  bool StoppedThisIteration = !StopAlgorithm;
-  StopAlgorithm = true;
-
-  if(StoppedThisIteration)
-      return 0;
-
-  return RAGreedy::selectOrSplit(VirtReg, SplitVRegs);
+    return (NUncolored != 0);
 }
 
 bool RAGraph::run(MachineFunction &mf)
 {
-  MF = &mf;
+    MF = &mf;
+    TII = MF->getSubtarget().getInstrInfo();
+    TRI = &VRM->getTargetRegInfo();
+    MRI = &VRM->getRegInfo();
+    MRI->freezeReservedRegs();
+    RegClassInfo.runOnMachineFunction(VRM->getMachineFunction());
 
-  //RegAllocCounter::startFunction(&mf);
-  std::cout << mf.getName().str() << std::endl;
+    Indexes->packIndexes();
 
-  StopAlgorithm = false;
-  IterationCount = 0;
+    VRAI = new VirtRegAuxInfo(*MF, *LIS, *VRM, *Loops, *MBFI);
+    VRAI->calculateSpillWeightsAndHints();
 
-  return RAGreedy::run(mf);
+    SpillerInstance = createInlineSpiller({*LIS, *LSS, *DomTree, *MBFI}, *MF,
+                                          *VRM, *VRAI, Matrix);
 
-  if(Splitter)
-  {
-      delete Splitter;
-  }
+    SA = new SplitAnalysis(*VRM, *LIS, *Loops);
+    SE = new SplitEditor(*SA, *LIS, *VRM, *DomTree, *MBFI, *VRAI);
+
+    DeadRemats.clear();
+
+    ExtraInfo = new ExtraRegInfo();
+
+    Splitter = new RegisterSplitter(ExtraInfo,
+                                    LIS,
+                                    SA,
+                                    SE,
+                                    TRI,
+                                    MF,
+                                    SpillPlacer,
+                                    Bundles,
+                                    Indexes,
+                                    Loops,
+                                    MBFI,
+                                    VRM,
+                                    this,
+                                    &RegClassInfo,
+                                    MRI,
+                                    DebugVars,
+                                    Matrix,
+                                    TII,
+                                    &DeadRemats
+                                   );
+
+    while(iterate());
+
+    SpillerInstance->postOptimization();
+    for (auto *DeadInst : DeadRemats) {
+        LIS->RemoveMachineInstrFromMaps(*DeadInst);
+        DeadInst->eraseFromParent();
+    }
+
+    delete VRAI;
+    delete SA;
+    delete Splitter;
+    delete SpillerInstance;
+    delete ExtraInfo;
+
+    return true;
 }
 
 }
