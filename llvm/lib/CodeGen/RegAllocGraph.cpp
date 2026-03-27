@@ -183,7 +183,7 @@ class RAGraph : private LiveRangeEdit::Delegate
 
     RegisterClassInfo RegClassInfo;
 
-    std::string AlgorithmID;
+    regalloc_graph_solver *Solver = RegAllocBitEASolver;
 
     bool iterate();
 
@@ -191,8 +191,17 @@ class RAGraph : private LiveRangeEdit::Delegate
     void LRE_WillShrinkVirtReg(Register) override;
     void LRE_DidCloneVirtReg(Register, Register) override;
 
+    bool shouldAssign(Register VirtReg);
+
+    RegInterferenceGraph buildGraph(std::vector<Register> &VirtRegs,
+                                    std::vector<MCRegister> &PhysRegs);
+
+    void assignSolution(std::vector<int> &Solution,
+                        std::vector<Register> &VirtRegs,
+                        std::vector<MCRegister> &PhysRegs);
+
 public:
-    RAGraph(const char *ID, Pass *P, const RegAllocFilterFunc F = nullptr);
+    RAGraph(std::string AlgorithmID, Pass *P, const RegAllocFilterFunc F = nullptr);
     bool run(MachineFunction &mf);
     void onUnassigned(Register VirtReg);
 };
@@ -202,10 +211,8 @@ bool RAGraphInit::runOnMachineFunction(MachineFunction &MF) {
   return Impl.run(MF);
 }
 
-RAGraph::RAGraph(const char *ID, Pass *P, const RegAllocFilterFunc F)
+RAGraph::RAGraph(std::string AlgorithmID, Pass *P, const RegAllocFilterFunc F)
 {
-    AlgorithmID = ID;
-
     VRM = &P->getAnalysis<VirtRegMapWrapperLegacy>().getVRM();
     LIS = &P->getAnalysis<LiveIntervalsWrapperPass>().getLIS();
     Matrix = &P->getAnalysis<LiveRegMatrixWrapperLegacy>().getLRM();
@@ -226,6 +233,11 @@ RAGraph::RAGraph(const char *ID, Pass *P, const RegAllocFilterFunc F)
     {
         srand(time(0));
     }
+
+#define REGALLOC_GRAPH_SOLVER_ENTRY(Name, ID) \
+    if(AlgorithmID == #ID) Solver = Name;
+    REGALLOC_GRAPH_SOLVER_TABLE
+#undef REGALLOC_GRAPH_SOLVER_ENTRY
 }
 
 bool RAGraph::LRE_CanEraseVirtReg(Register VirtReg) {
@@ -253,6 +265,218 @@ void RAGraph::LRE_WillShrinkVirtReg(Register VirtReg) {
 
 void RAGraph::LRE_DidCloneVirtReg(Register New, Register Old) {
   ExtraInfo->LRE_DidCloneVirtReg(New, Old);
+}
+
+bool RAGraph::shouldAssign(Register VirtReg)
+{
+    bool Result = (VirtReg.isValid() && VirtReg.isVirtual() &&
+                   !MRI->reg_nodbg_empty(VirtReg));
+
+    return Result;
+}
+
+RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
+                                         std::vector<MCRegister> &PhysRegs)
+{
+    VirtRegs.resize(0);
+    PhysRegs.resize(0);
+
+    Matrix->invalidateVirtRegs();
+    unsigned AllVirtRegs = MRI->getNumVirtRegs();
+
+    for(unsigned VirtIndex = 0;
+        VirtIndex < AllVirtRegs;
+        ++VirtIndex)
+    {
+        Register VirtReg = Register::index2VirtReg(VirtIndex);
+        if(shouldAssign(VirtReg) && !VRM->hasPhys(VirtReg))
+        {
+            auto Stage = ExtraInfo->getOrInitStage(VirtReg);
+            if (Stage == RS_New) {
+                Stage = RS_Assign;
+                ExtraInfo->setStage(VirtReg, Stage);
+            }
+            VirtRegs.push_back(VirtReg);
+        }
+    }
+
+    for(Register VirtReg : VirtRegs)
+    {
+        AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+
+        for(MCRegister PhysRegToAdd : Order)
+        {
+          if(Matrix->checkInterference(*Interval, PhysRegToAdd) ==
+             LiveRegMatrix::IK_Free)
+          {
+              MCRegister SuperRegister = PhysRegToAdd;
+              auto SuperRegisters = TRI->superregs(SuperRegister);
+              while(!SuperRegisters.empty())
+              {
+                  SuperRegister = *SuperRegisters.begin();
+                  SuperRegisters = TRI->superregs(SuperRegister);
+              }
+
+              bool Exists = false;
+              for(MCRegister PhysRegToCheck : PhysRegs)
+              {
+                  if(PhysRegToCheck.id() == SuperRegister.id())
+                  {
+                      Exists = true;
+                      break;
+                  }
+              }
+
+              if(!Exists)
+              {
+                  PhysRegs.push_back(SuperRegister);
+              }
+          }
+        }
+    }
+
+    unsigned PhysRegCount = PhysRegs.size();
+    unsigned VirtRegCount = VirtRegs.size();
+
+    RegInterferenceGraph Graph(PhysRegCount, VirtRegCount);
+
+    for(unsigned VirtRegIndex = 0;
+        VirtRegIndex < VirtRegCount;
+        ++VirtRegIndex)
+    {
+        Register VirtReg = VirtRegs[VirtRegIndex];
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+        Graph.setWeight(VirtRegIndex, Interval->weight());
+        bool Spillable = (Interval->isSpillable() && (ExtraInfo->getStage(VirtReg) < RS_Done));
+        Graph.setSpillable(VirtRegIndex, Spillable);
+    }
+
+    for(unsigned PhysRegIndexA = 0;
+        PhysRegIndexA < PhysRegCount;
+        ++PhysRegIndexA)
+    {
+        unsigned VertIndexA = Graph.physIndexToVertIndex(PhysRegIndexA);
+
+        for(unsigned PhysRegIndexB = PhysRegIndexA + 1;
+            PhysRegIndexB < PhysRegCount;
+            ++PhysRegIndexB)
+        {
+            unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndexB);
+
+            Graph.addEdge(VertIndexA, VertIndexB);
+        }
+    }
+
+    for(unsigned VirtRegIndexA = 0;
+        VirtRegIndexA < VirtRegCount;
+        ++VirtRegIndexA)
+    {
+        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndexA);
+
+        for(unsigned VirtRegIndexB = VirtRegIndexA + 1;
+            VirtRegIndexB < VirtRegCount;
+            ++VirtRegIndexB)
+        {
+            unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtRegIndexB);
+
+            LiveInterval *IntervalA = &LIS->getInterval(VirtRegs[VirtRegIndexA]);
+            LiveInterval *IntervalB = &LIS->getInterval(VirtRegs[VirtRegIndexB]);
+
+            if(!(IntervalA->empty() || IntervalB->empty()) &&
+               IntervalA->overlaps(*IntervalB))
+            {
+                Graph.addEdge(VertIndexA, VertIndexB);
+            }
+        }
+    }
+
+    for(unsigned VirtRegIndex = 0;
+        VirtRegIndex < VirtRegCount;
+        ++VirtRegIndex)
+    {
+        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndex);
+
+        for(unsigned PhysRegIndex = 0;
+            PhysRegIndex < PhysRegCount;
+            ++PhysRegIndex)
+        {
+            bool CanAssign = false;
+            bool IsHint = false;
+
+            Register VirtReg = VirtRegs[VirtRegIndex];
+            LiveInterval *Interval = &LIS->getInterval(VirtReg);
+
+            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+            for(MCRegister PhysReg : Order)
+            {
+                if(TRI->isSuperRegisterEq(PhysReg, PhysRegs[PhysRegIndex]))
+                {
+                    if(Matrix->checkInterference(*Interval, PhysReg) == LiveRegMatrix::IK_Free)
+                    {
+                        if(Order.isHint(PhysReg))
+                        {
+                            IsHint = true;
+                        }
+
+                        CanAssign = true;
+                        break;
+                    }
+                }
+            }
+
+            if(!CanAssign)
+            {
+                unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndex);
+
+                Graph.addEdge(VertIndexA, VertIndexB);
+
+                if(IsHint)
+                {
+                    Graph.addHint(VertIndexA, VertIndexB);
+                }
+            }
+        }
+    }
+
+    return Graph;
+}
+
+void RAGraph::assignSolution(std::vector<int> &Solution,
+                             std::vector<Register> &VirtRegs,
+                             std::vector<MCRegister> &PhysRegs)
+{
+    unsigned VirtRegCount = VirtRegs.size();
+
+    for(unsigned VirtIndex = 0;
+        VirtIndex < VirtRegCount;
+        ++VirtIndex)
+    {
+        Register VirtReg = VirtRegs[VirtIndex];
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+        if(Solution[VirtIndex] != -1)
+        {
+            MCRegister SuperReg = PhysRegs[Solution[VirtIndex]];
+
+            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+
+            bool IsAssigned = false;
+
+            for(MCRegister PhysReg : Order)
+            {
+                if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
+                {
+                    assert(PhysReg.isValid());
+                    Matrix->assign(*Interval, PhysReg);
+                    IsAssigned = true;
+                    break;
+                }
+            }
+
+            assert(IsAssigned);
+        }
+    }
 }
 
 void RAGraph::onUnassigned(Register VirtReg)
@@ -348,7 +572,7 @@ void RAGraph::onUnassigned(Register VirtReg)
   NamedRegionTimer T("spill", "Spiller", TimerGroupName,
                      TimerGroupDescription, TimePassesIsEnabled);
                      */
-  std::cout << "Spilling " << VirtReg << std::endl;
+  //std::cout << "Spilling " << VirtReg << std::endl;
   RegAllocCounter::addSpillage(Interval);
   LiveRangeEdit LRE(Interval, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   SpillerInstance->spill(LRE, &Order);
@@ -368,87 +592,19 @@ void RAGraph::onUnassigned(Register VirtReg)
 
 bool RAGraph::iterate()
 {
-    Matrix->invalidateVirtRegs();
-    unsigned AllVirtRegs = MRI->getNumVirtRegs();
+    std::vector<Register> VirtRegs;
+    std::vector<MCRegister> PhysRegs;
 
-    std::vector<Register> VirtRegsToAssign;
-    for(unsigned VirtIndex = 0;
-        VirtIndex < AllVirtRegs;
-        ++VirtIndex)
-    {
-        Register VirtReg = Register::index2VirtReg(VirtIndex);
-        if(!VirtReg.isValid() || !VirtReg.isVirtual())
-        {
-        }
-        else if(MRI->reg_nodbg_empty(VirtReg))
-        {
-            /*
-            if(LIS->hasInterval(VirtReg))
-            {
-                LIS->removeInterval(VirtReg);
-            }
-            */
-        }
-        else if(!VRM->hasPhys(VirtReg))
-        {
-            auto Stage = ExtraInfo->getOrInitStage(VirtReg);
-            if (Stage == RS_New) {
-                Stage = RS_Assign;
-                ExtraInfo->setStage(VirtReg, Stage);
-            }
-            VirtRegsToAssign.push_back(VirtReg);
-        }
-    }
+    RegInterferenceGraph Graph = buildGraph(VirtRegs, PhysRegs);
 
-    unsigned VirtRegCount = VirtRegsToAssign.size();
-
-    std::cout << "VirtRegCount: " << VirtRegCount << std::endl;
+    unsigned PhysRegCount = PhysRegs.size();
+    unsigned VirtRegCount = VirtRegs.size();
 
     if(VirtRegCount == 0) return false;
 
-    std::vector<MCRegister> PhysRegs;
-    for(Register VirtReg : VirtRegsToAssign)
-    {
-        AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
-
-        LiveInterval *Interval = &LIS->getInterval(VirtReg);
-
-        for(MCRegister PhysRegToAdd : Order)
-        {
-          if(Matrix->checkInterference(*Interval, PhysRegToAdd) ==
-             LiveRegMatrix::IK_Free)
-          {
-              MCRegister SuperRegister = PhysRegToAdd;
-              auto SuperRegisters = TRI->superregs(SuperRegister);
-              while(!SuperRegisters.empty())
-              {
-                  SuperRegister = *SuperRegisters.begin();
-                  SuperRegisters = TRI->superregs(SuperRegister);
-              }
-
-              bool Exists = false;
-              for(MCRegister PhysRegToCheck : PhysRegs)
-              {
-                  if(PhysRegToCheck.id() == SuperRegister.id())
-                  {
-                      Exists = true;
-                      break;
-                  }
-              }
-
-              if(!Exists)
-              {
-                  PhysRegs.push_back(SuperRegister);
-              }
-          }
-        }
-    }
-
-    unsigned PhysRegCount = PhysRegs.size();
-
     if(PhysRegCount == 0)
     {
-        for(Register VirtReg : VirtRegsToAssign)
+        for(Register VirtReg : VirtRegs)
         {
             onUnassigned(VirtReg);
         }
@@ -456,169 +612,117 @@ bool RAGraph::iterate()
         return true;
     }
 
-    RegInterferenceGraph Graph(PhysRegCount, VirtRegCount);
+    unsigned NAssigned = 0;
+    unsigned NUncolored = VirtRegCount;
 
-    for(unsigned VirtRegIndex = 0;
-        VirtRegIndex < VirtRegCount;
-        ++VirtRegIndex)
+#if 0
+    if(false)
     {
-        Register VirtReg = VirtRegsToAssign[VirtRegIndex];
-        LiveInterval *Interval = &LIS->getInterval(VirtReg);
-        Graph.setWeight(VirtRegIndex, Interval->weight());
-        bool Spillable = (Interval->isSpillable() && (ExtraInfo->getStage(VirtReg) < RS_Done));
-        Graph.setSpillable(VirtRegIndex, Spillable);
-    }
+        RegInterferenceGraph RestrictedGraph = Graph;
+        RestrictedGraph.addHintsAsEdges();
 
-    for(unsigned PhysRegIndexA = 0;
-        PhysRegIndexA < PhysRegCount;
-        ++PhysRegIndexA)
-    {
-        unsigned VertIndexA = Graph.physIndexToVertIndex(PhysRegIndexA);
+        std::vector<int> Solution = Solver(RestrictedGraph);
 
-        for(unsigned PhysRegIndexB = PhysRegIndexA + 1;
-            PhysRegIndexB < PhysRegCount;
-            ++PhysRegIndexB)
+        unsigned IterationAssignCount = 0;
+        for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
+
+        assignSolution(Solution, VirtRegs, PhysRegs);
+
+        std::cout << "Assigned " << IterationAssignCount << " hints" << std::endl;
+
+        NAssigned += IterationAssignCount;
+        NUncolored -= IterationAssignCount;
+
+        if(IterationAssignCount)
         {
-            unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndexB);
+            Graph = buildGraph(VirtRegs, PhysRegs);
 
-            Graph.addEdge(VertIndexA, VertIndexB);
+            PhysRegCount = PhysRegs.size();
+            VirtRegCount = VirtRegs.size();
         }
-    }
 
-    for(unsigned VirtRegIndexA = 0;
-        VirtRegIndexA < VirtRegCount;
-        ++VirtRegIndexA)
-    {
-        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndexA);
+        if(VirtRegCount == 0) return false;
 
-        for(unsigned VirtRegIndexB = VirtRegIndexA + 1;
-            VirtRegIndexB < VirtRegCount;
-            ++VirtRegIndexB)
+        if(PhysRegCount == 0)
         {
-            unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtRegIndexB);
-
-            LiveInterval *IntervalA = &LIS->getInterval(VirtRegsToAssign[VirtRegIndexA]);
-            LiveInterval *IntervalB = &LIS->getInterval(VirtRegsToAssign[VirtRegIndexB]);
-
-            if(!(IntervalA->empty() || IntervalB->empty()) &&
-               IntervalA->overlaps(*IntervalB))
+            for(Register VirtReg : VirtRegs)
             {
-                Graph.addEdge(VertIndexA, VertIndexB);
-            }
-        }
-    }
-
-    for(unsigned VirtRegIndex = 0;
-        VirtRegIndex < VirtRegCount;
-        ++VirtRegIndex)
-    {
-        unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndex);
-
-        for(unsigned PhysRegIndex = 0;
-            PhysRegIndex < PhysRegCount;
-            ++PhysRegIndex)
-        {
-            bool CanAssign = false;
-            bool IsHint = false;
-
-            Register VirtReg = VirtRegsToAssign[VirtRegIndex];
-            LiveInterval *Interval = &LIS->getInterval(VirtReg);
-
-            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
-            for(MCRegister PhysReg : Order)
-            {
-                if(TRI->isSuperRegisterEq(PhysReg, PhysRegs[PhysRegIndex]))
-                {
-                    if(Matrix->checkInterference(*Interval, PhysReg) == LiveRegMatrix::IK_Free)
-                    {
-                        if(Order.isHint(PhysReg))
-                        {
-                            IsHint = true;
-                        }
-
-                        CanAssign = true;
-                        break;
-                    }
-                }
+                onUnassigned(VirtReg);
             }
 
-            if(!CanAssign)
-            {
-                unsigned VertIndexB = Graph.physIndexToVertIndex(PhysRegIndex);
-
-                Graph.addEdge(VertIndexA, VertIndexB);
-
-                if(IsHint)
-                {
-                    Graph.addHint(VertIndexA, VertIndexB);
-                }
-            }
+            return true;
         }
     }
-
-    regalloc_graph_solver *Solver = RegAllocBitEASolver;
-
-#define REGALLOC_GRAPH_SOLVER_ENTRY(Name, ID) \
-    if(AlgorithmID == #ID) Solver = Name;
-    REGALLOC_GRAPH_SOLVER_TABLE
-#undef REGALLOC_GRAPH_SOLVER_ENTRY
+#endif
 
     std::vector<int> Solution = Solver(Graph);
 
-    unsigned NUncolored = 0;
-    unsigned NAssigned = 0;
+    unsigned IterationAssignCount = 0;
+    for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
 
-    for(unsigned VirtIndex = 0;
-        VirtIndex < VirtRegCount;
-        ++VirtIndex)
+    NAssigned += IterationAssignCount;
+    NUncolored -= IterationAssignCount;
+
+#if 0
+    if(NUncolored == 0)
     {
-        Register VirtReg = VirtRegsToAssign[VirtIndex];
-        LiveInterval *Interval = &LIS->getInterval(VirtReg);
-        if(Solution[VirtIndex] != -1)
+        for(unsigned PhysIndex = 0;
+            PhysIndex < PhysRegCount;
+            ++PhysIndex)
         {
-            MCRegister SuperReg = PhysRegs[Solution[VirtIndex]];
-
-            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
-
-            bool IsAssigned = false;
-
-            for(MCRegister PhysReg : Order)
+            MCRegister SuperReg = PhysRegs[PhysIndex];
+            MCRegister CSRAlias = RegClassInfo.getLastCalleeSavedAlias(SuperReg);
+            if(CSRAlias)
             {
-                if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
+                std::cout << "Trying removing CSR" << std::endl;
+                RegInterferenceGraph RestrictedGraph = Graph;
+                RestrictedGraph.blockVertex(RestrictedGraph.physIndexToVertIndex(PhysIndex));
+
+                std::vector<int> RestrictedSolution = Solver(RestrictedGraph);
+
+                unsigned RestrictedAssignCount = 0;
+                for(int Index : RestrictedSolution) if(Index != -1) ++RestrictedAssignCount;
+
+                if(RestrictedAssignCount == IterationAssignCount)
                 {
-                    assert(PhysReg.isValid());
-                    Matrix->assign(*Interval, PhysReg);
-                    ++NAssigned;
-                    IsAssigned = true;
-                    break;
+                    std::cout << "Success\n";
+                    Solution = RestrictedSolution;
+                    Graph = RestrictedGraph;
                 }
             }
-
-            assert(IsAssigned);
         }
     }
+#endif
+
+    assignSolution(Solution, VirtRegs, PhysRegs);
+
+    unsigned AllVirtRegs = MRI->getNumVirtRegs();
 
     for(unsigned VirtIndex = 0;
-        VirtIndex < VirtRegCount;
+        VirtIndex < AllVirtRegs;
         ++VirtIndex)
     {
-        if(Solution[VirtIndex] == -1)
+        Register VirtReg = Register::index2VirtReg(VirtIndex);
+        if(shouldAssign(VirtReg))
         {
-            Register VirtReg = VirtRegsToAssign[VirtIndex];
-            onUnassigned(VirtReg);
-            ++NUncolored;
+            if(!VRM->hasPhys(VirtReg))
+            {
+                onUnassigned(VirtReg);
+            }
         }
     }
 
     if(UnassignUntilComplete && (NUncolored != 0))
     {
+        unsigned AllVirtRegs = MRI->getNumVirtRegs();
+
         for(unsigned VirtIndex = 0;
-            VirtIndex < VirtRegCount;
+            VirtIndex < AllVirtRegs;
             ++VirtIndex)
         {
-            if(Solution[VirtIndex] != -1)
+            Register VirtReg = Register::index2VirtReg(VirtIndex);
+            if(shouldAssign(VirtReg))
             {
-                Register VirtReg = VirtRegsToAssign[VirtIndex];
                 if(VRM->hasPhys(VirtReg))
                 {
                     LiveInterval *Interval = &LIS->getInterval(VirtReg);
@@ -641,6 +745,9 @@ bool RAGraph::iterate()
 bool RAGraph::run(MachineFunction &mf)
 {
     MF = &mf;
+
+    RegAllocCounter::startFunction(MF);
+
     TII = MF->getSubtarget().getInstrInfo();
     TRI = &VRM->getTargetRegInfo();
     MRI = &VRM->getRegInfo();
@@ -684,6 +791,8 @@ bool RAGraph::run(MachineFunction &mf)
                                    );
 
     while(iterate());
+
+    RegAllocCounter::count(MRI, LIS, VRM);
 
     SpillerInstance->postOptimization();
     for (auto *DeadInst : DeadRemats) {

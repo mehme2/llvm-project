@@ -86,6 +86,8 @@
 #include <utility>
 #include <vector>
 
+#include "RegAllocCounter.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
@@ -689,6 +691,7 @@ void RegAllocPBQP::spillVReg(Register VReg,
                              MachineFunction &MF, LiveIntervals &LIS,
                              VirtRegMap &VRM, Spiller &VRegSpiller) {
   VRegsToAlloc.erase(VReg);
+  RegAllocCounter::addSpillage(&LIS.getInterval(VReg));
   LiveRangeEdit LRE(&LIS.getInterval(VReg), NewIntervals, MF, LIS, &VRM,
                     nullptr, &DeadRemats);
   VRegSpiller.spill(LRE);
@@ -788,6 +791,7 @@ void RegAllocPBQP::postOptimization(Spiller &VRegSpiller, LiveIntervals &LIS) {
 }
 
 bool RegAllocPBQP::runOnMachineFunction(MachineFunction &MF) {
+  RegAllocCounter::startFunction(&MF);
   LiveIntervals &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
   MachineBlockFrequencyInfo &MBFI =
       getAnalysis<MachineBlockFrequencyInfoWrapperPass>().getMBFI();
@@ -876,6 +880,7 @@ bool RegAllocPBQP::runOnMachineFunction(MachineFunction &MF) {
 
   // Finalise allocation, allocate empty ranges.
   finalizeAlloc(MF, LIS, VRM);
+  RegAllocCounter::count(&VRM.getRegInfo(), &LIS, &VRM);
   postOptimization(*VRegSpiller, LIS);
   VRegsToAlloc.clear();
   EmptyIntervalVRegs.clear();

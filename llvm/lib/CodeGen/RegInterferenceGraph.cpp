@@ -3,8 +3,7 @@
 
 RegInterferenceGraph::RegInterferenceGraph(unsigned PhysRegisterCount, unsigned VirtRegisterCount) :
     VirtRegWeights(VirtRegisterCount, 1.0f),
-    VirtRegSpillable(VirtRegisterCount, false),
-    EdgeCounts(PhysRegisterCount + VirtRegisterCount, 0)
+    VirtRegSpillable(VirtRegisterCount, false)
 {
     VirtRegCount = VirtRegisterCount;
     PhysRegCount = PhysRegisterCount;
@@ -35,34 +34,66 @@ void RegInterferenceGraph::setSpillable(unsigned VirtRegIndex, bool Spillable)
 void RegInterferenceGraph::addEdge(unsigned VertexIndexA, unsigned VertexIndexB)
 {
     unsigned WordIndexA = VertexIndexA >> WordBitCount;
-    unsigned BitIndexA = VertexIndexA & AdjacencyBitMask;
+    unsigned BitIndexA = VertexIndexA & WordBitMask;
 
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
-    unsigned BitIndexB = VertexIndexB & AdjacencyBitMask;
+    unsigned BitIndexB = VertexIndexB & WordBitMask;
 
     AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] |= (1LL << BitIndexB);
     AdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] |= (1LL << BitIndexA);
-
-    ++EdgeCounts[VertexIndexA];
-    ++EdgeCounts[VertexIndexB];
 }
 
 void RegInterferenceGraph::addHint(unsigned VertexIndexA, unsigned VertexIndexB)
 {
     unsigned WordIndexA = VertexIndexA >> WordBitCount;
-    unsigned BitIndexA = VertexIndexA & AdjacencyBitMask;
+    unsigned BitIndexA = VertexIndexA & WordBitMask;
 
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
-    unsigned BitIndexB = VertexIndexB & AdjacencyBitMask;
+    unsigned BitIndexB = VertexIndexB & WordBitMask;
 
     HintAdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] |= (1LL << BitIndexB);
     HintAdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] |= (1LL << BitIndexA);
 }
 
+void RegInterferenceGraph::addHintsAsEdges()
+{
+    unsigned VertCount = getVertexCount();
+
+    for(unsigned VertIndexA = 0;
+        VertIndexA < VertCount;
+        ++VertIndexA)
+    {
+        for(unsigned VertIndexB = 0;
+            VertIndexB < VertCount;
+            ++VertIndexB)
+        {
+            if((VertIndexA != VertIndexB) && !isHint(VertIndexA, VertIndexB))
+            {
+                addEdge(VertIndexA, VertIndexB);
+            }
+        }
+    }
+}
+
+void RegInterferenceGraph::blockVertex(unsigned VertexIndex)
+{
+    unsigned VertCount = getVertexCount();
+
+    for(unsigned VertIndexA = 0;
+        VertIndexA < VertCount;
+        ++VertIndexA)
+    {
+        if(VertexIndex != VertIndexA)
+        {
+            addEdge(VertexIndex, VertIndexA);
+        }
+    }
+}
+
 bool RegInterferenceGraph::isHint(unsigned VertexIndexA, unsigned VertexIndexB) const
 {
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
-    unsigned BitIndexB = VertexIndexB & AdjacencyBitMask;
+    unsigned BitIndexB = VertexIndexB & WordBitMask;
 
     return ((HintAdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0);
 }
@@ -70,7 +101,7 @@ bool RegInterferenceGraph::isHint(unsigned VertexIndexA, unsigned VertexIndexB) 
 bool RegInterferenceGraph::hasEdge(unsigned VertexIndexA, unsigned VertexIndexB) const
 {
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
-    unsigned BitIndexB = VertexIndexB & AdjacencyBitMask;
+    unsigned BitIndexB = VertexIndexB & WordBitMask;
 
     return ((AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0);
 }
@@ -83,11 +114,6 @@ bool RegInterferenceGraph::isSpillable(unsigned VirtIndex) const
 float RegInterferenceGraph::getWeight(unsigned VirtIndex) const
 {
     return VirtRegWeights[VirtIndex];
-}
-
-unsigned RegInterferenceGraph::getEdgeCount(unsigned VertIndex) const
-{
-    return EdgeCounts[VertIndex];
 }
 
 unsigned RegInterferenceGraph::physIndexToVertIndex(unsigned PhysIndex) const

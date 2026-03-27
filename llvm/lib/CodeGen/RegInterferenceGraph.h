@@ -14,6 +14,10 @@ public:
     void addEdge(unsigned VertexIndexA, unsigned VertexIndexB);
     void addHint(unsigned VertexIndexA, unsigned VertexIndexB);
 
+    void addHintsAsEdges();
+
+    void blockVertex(unsigned VertexIndex);
+
     void setWeight(unsigned VirtRegIndex, float Weight);
     void setSpillable(unsigned VirtRegIndex, bool Spillable);
 
@@ -21,7 +25,6 @@ public:
     bool isHint(unsigned VertexIndexA, unsigned VertexIndexB) const;
     bool isSpillable(unsigned VirtIndex) const;
     float getWeight(unsigned VirtIndex) const;
-    unsigned getEdgeCount(unsigned VertIndex) const;
 
     unsigned physIndexToVertIndex(unsigned PhysIndex) const;
     unsigned virtIndexToVertIndex(unsigned VirtIndex) const;
@@ -46,7 +49,6 @@ private:
 
     std::vector<float> VirtRegWeights;
     std::vector<unsigned> VirtRegSpillable;
-    std::vector<unsigned> EdgeCounts;
 
     std::vector<uint64_t> AdjacencyMatrix;
     std::vector<uint64_t> HintAdjacencyMatrix;

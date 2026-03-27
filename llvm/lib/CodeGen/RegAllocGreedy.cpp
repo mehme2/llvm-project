@@ -74,6 +74,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "RegAllocCounter.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
@@ -2683,6 +2685,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
   // Finally spill VirtReg itself.
   NamedRegionTimer T("spill", "Spiller", TimerGroupName,
                      TimerGroupDescription, TimePassesIsEnabled);
+  RegAllocCounter::addSpillage(&VirtReg);
   LiveRangeEdit LRE(&VirtReg, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   spiller().spill(LRE, &Order);
   ExtraInfo->setStage(NewVRegs.begin(), NewVRegs.end(), RS_Done);
@@ -2895,6 +2898,8 @@ bool RAGreedy::run(MachineFunction &mf) {
   MF = &mf;
   TII = MF->getSubtarget().getInstrInfo();
 
+  RegAllocCounter::startFunction(MF);
+
   if (VerifyEnabled)
     MF->verify(LIS, Indexes, "Before greedy register allocator", &errs());
 
@@ -2943,6 +2948,7 @@ bool RAGreedy::run(MachineFunction &mf) {
 
   allocatePhysRegs();
   tryHintsRecoloring();
+  RegAllocCounter::count(MRI, LIS, VRM);
 
   if (VerifyEnabled)
     MF->verify(LIS, Indexes, "Before post optimization", &errs());
