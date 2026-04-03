@@ -193,6 +193,8 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocPriorityAdvisor.cpp
   RegAllocBEAM.c
   RegAllocBEAM.cpp
+  RegAllocTabuCol.cpp
+  RegAllocPython.cpp
   RegAllocBitEA.c
   RegAllocBitEA.cpp 
   RegAllocCounter.cpp

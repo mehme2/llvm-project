@@ -974,13 +974,13 @@ int sign(weight_t val)
 }
 
 int comp_crit_1(const void* a, const void* b, void* metrics) {
-    weight_t* weights = ((int**)metrics)[0];
+    weight_t* weights = ((weight_t**)metrics)[0];
     int* degrees = ((int**)metrics)[1];
     return sign((weights[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b]));
 }
 
 int comp_crit_2(const void* a, const void* b, void* metrics) {
-    weight_t* weights = ((int**)metrics)[0];
+    weight_t* weights = ((weight_t**)metrics)[0];
     int* degrees = ((int**)metrics)[1];
     return sign((weights[*(int*)a] * degrees[*(int*)a] * degrees[*(int*)a]) - (weights[*(int*)b] * degrees[*(int*)b] * degrees[*(int*)b]));
 }
@@ -1009,11 +1009,11 @@ void pop_complex_random (
     int degrees[graph_size];
     count_edges(graph_size, edges, degrees);
 
-    const int* metrics[2] = {weights, degrees};
+    const void* metrics[2] = {(void *)weights, (void *)degrees};
 
-    qsort_r(criteria[0], graph_size, sizeof(int), comp_crit_1, (void*)metrics);
-    qsort_r(criteria[1], graph_size, sizeof(int), comp_crit_2, (void*)metrics);
-    qsort_r(criteria[2], graph_size, sizeof(int), comp_crit_3, (void*)weights);
+    qsort_r(criteria[0], graph_size, sizeof(int), comp_crit_1, metrics);
+    qsort_r(criteria[1], graph_size, sizeof(int), comp_crit_2, metrics);
+    qsort_r(criteria[2], graph_size, sizeof(int), comp_crit_3, (void *)weights);
 
     // Go through the queue and color each vertex.
     block_t adjacent_colors[TOTAL_BLOCK_NUM(graph_size)];

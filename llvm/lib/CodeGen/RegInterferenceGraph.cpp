@@ -1,5 +1,6 @@
 #include "RegInterferenceGraph.h"
 #include "llvm/ADT/bit.h"
+#include <cassert>
 
 RegInterferenceGraph::RegInterferenceGraph(unsigned PhysRegisterCount, unsigned VirtRegisterCount) :
     VirtRegWeights(VirtRegisterCount, 1.0f),
@@ -100,8 +101,14 @@ bool RegInterferenceGraph::isHint(unsigned VertexIndexA, unsigned VertexIndexB) 
 
 bool RegInterferenceGraph::hasEdge(unsigned VertexIndexA, unsigned VertexIndexB) const
 {
+    unsigned WordIndexA = VertexIndexA >> WordBitCount;
+    unsigned BitIndexA = VertexIndexA & WordBitMask;
+
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
     unsigned BitIndexB = VertexIndexB & WordBitMask;
+
+    assert(((AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0) ==
+           ((AdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] & (1LL << BitIndexA)) != 0));
 
     return ((AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0);
 }

@@ -38,30 +38,6 @@ static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm
 
 static llvm::cl::opt<unsigned> RegallocSeed("regalloc-seed", llvm::cl::init(0), llvm::cl::Hidden, llvm::cl::desc("srand seed for every function's register allocation"));
 
-struct RAGreedy::RequiredAnalyses {
-  VirtRegMap *VRM = nullptr;
-  LiveIntervals *LIS = nullptr;
-  LiveRegMatrix *LRM = nullptr;
-  SlotIndexes *Indexes = nullptr;
-  MachineBlockFrequencyInfo *MBFI = nullptr;
-  MachineDominatorTree *DomTree = nullptr;
-  MachineLoopInfo *Loops = nullptr;
-  MachineOptimizationRemarkEmitter *ORE = nullptr;
-  EdgeBundles *Bundles = nullptr;
-  SpillPlacement *SpillPlacer = nullptr;
-  LiveDebugVariables *DebugVars = nullptr;
-
-  // Used by InlineSpiller
-  LiveStacks *LSS;
-  // Proxies for eviction and priority advisors
-  RegAllocEvictionAdvisorProvider *EvictProvider;
-  RegAllocPriorityAdvisorProvider *PriorityProvider;
-
-  RequiredAnalyses() = delete;
-  RequiredAnalyses(Pass &P);
-  RequiredAnalyses(MachineFunction &MF, MachineFunctionAnalysisManager &MFAM);
-};
-
 class RAGraphInit : public MachineFunctionPass {
   RegAllocFilterFunc F;
 
@@ -130,6 +106,10 @@ static RegisterRegAlloc CustomRegAlloc_##ID(#ID, #ID, createCustomRegisterAlloca
 
 char RAGraphInit::ID = 0;
 
+}
+
+using namespace llvm;
+
 INITIALIZE_PASS_BEGIN(RAGraphInit, "graph", "Graph Register Allocator",
                       false, false)
 INITIALIZE_PASS_DEPENDENCY(LiveDebugVariablesWrapperLegacy)
@@ -149,6 +129,8 @@ INITIALIZE_PASS_DEPENDENCY(RegAllocEvictionAdvisorAnalysisLegacy)
 INITIALIZE_PASS_DEPENDENCY(RegAllocPriorityAdvisorAnalysisLegacy)
 INITIALIZE_PASS_END(RAGraphInit, "graph", "Graph Register Allocator",
                     false, false)
+
+namespace llvm {
 
 class RAGraph : private LiveRangeEdit::Delegate
 {
@@ -747,6 +729,8 @@ bool RAGraph::run(MachineFunction &mf)
     MF = &mf;
 
     RegAllocCounter::startFunction(MF);
+
+    std::cout << mf.getName().str() << std::endl;
 
     TII = MF->getSubtarget().getInstrInfo();
     TRI = &VRM->getTargetRegInfo();

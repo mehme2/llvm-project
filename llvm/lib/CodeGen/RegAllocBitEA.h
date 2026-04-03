@@ -51,21 +51,6 @@ bool is_valid(
 
 int count_edges(int graph_size, const block_t *edges, int degrees[]);
 
-void print_colors(
-    const char *filename, 
-    const char *header, 
-    int color_num, 
-    int graph_size, 
-    const block_t *colors
-);
-
-int graph_color_greedy(
-    int graph_size, 
-    const block_t edges[][TOTAL_BLOCK_NUM(graph_size)], 
-    block_t colors[][TOTAL_BLOCK_NUM(graph_size)], 
-    int max_color_possible
-);
-
 void pop_complex_random (
     int graph_size, 
     const block_t *edges, 
