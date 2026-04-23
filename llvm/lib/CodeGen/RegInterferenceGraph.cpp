@@ -15,8 +15,6 @@ RegInterferenceGraph::RegInterferenceGraph(unsigned PhysRegisterCount, unsigned 
 
     AdjacencyWordCount = ((TotalVertexCount >> WordBitCount) +
                           ((TotalVertexCount & WordBitMask) ? 1 : 0));
-    AdjacencyBitMask = 8*AdjacencyWordCount*sizeof(uint64_t) - 1;
-    AdjacencyBitCount = llvm::countr_one(AdjacencyBitMask);
 
     AdjacencyMatrix = std::vector<uint64_t>(TotalVertexCount*AdjacencyWordCount, 0);
     HintAdjacencyMatrix = std::vector<uint64_t>(TotalVertexCount*AdjacencyWordCount, 0);
@@ -125,21 +123,26 @@ float RegInterferenceGraph::getWeight(unsigned VirtIndex) const
 
 unsigned RegInterferenceGraph::physIndexToVertIndex(unsigned PhysIndex) const
 {
+    assert(PhysIndex < PhysRegCount);
     return PhysIndex;
 }
 
 unsigned RegInterferenceGraph::virtIndexToVertIndex(unsigned VirtIndex) const
 {
+    assert(VirtIndex < VirtRegCount);
     return VirtIndex + PhysRegCount;
 }
 
 unsigned RegInterferenceGraph::vertIndexToPhysIndex(unsigned VertexIndex) const
 {
+    assert(VertexIndex < PhysRegCount);
     return VertexIndex;
 }
 
 unsigned RegInterferenceGraph::vertIndexToVirtIndex(unsigned VertexIndex) const
 {
+    assert(VertexIndex >= PhysRegCount);
+    assert(VertexIndex < TotalVertexCount);
     return VertexIndex - PhysRegCount;
 }
 

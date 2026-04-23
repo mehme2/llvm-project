@@ -180,7 +180,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
             ++WordIndex)
         {
             uint64_t Word = BEAMSolution.color_mat[ColorIndex*WordsPerColor + WordIndex];
-            while(true)
+            while(Word)
             {
                 unsigned BitIndex = llvm::countr_zero(Word);
                 if(BitIndex < WordBitCount)
@@ -190,6 +190,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
                     if(VertIndex >= VertexCount) continue;
                     if(Graph.isPhys(VertIndex))
                     {
+                        assert(PhysRegIndex == -1);
                         PhysRegIndex = Graph.vertIndexToPhysIndex(VertIndex);
                     }
                     else
@@ -218,14 +219,9 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
                             std::cout << "Warning: Color with no physical." << std::endl;
                             break;
                         }
-                        assert(!Graph.hasEdge(VertIndex,
-                                         Graph.physIndexToVertIndex(PhysRegIndex)));
+                        assert(!Graph.hasEdge(VertIndex, Graph.physIndexToVertIndex(PhysRegIndex)));
                         Solution[VirtRegIndex] = PhysRegIndex;
                     }
-                }
-                else
-                {
-                    break;
                 }
             }
         }

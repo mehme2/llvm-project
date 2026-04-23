@@ -34,7 +34,7 @@ static cl::opt<RAGraphUncoloredBehavior> UncoloredBehavior("uncolored-behavior",
                                                                       clEnumValN(RAGraphUncoloredBehavior::Greedy, "greedy", "Greedy allocator behavior")),
                                                            cl::init(RAGraphUncoloredBehavior::SpillOnly));
 
-static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::desc("unassign every virtual before reconstructing graph"));
+static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm::cl::init(true), llvm::cl::Hidden, llvm::cl::desc("unassign every virtual before reconstructing graph"));
 
 static llvm::cl::opt<unsigned> RegallocSeed("regalloc-seed", llvm::cl::init(0), llvm::cl::Hidden, llvm::cl::desc("srand seed for every function's register allocation"));
 
@@ -293,6 +293,7 @@ RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
           if(Matrix->checkInterference(*Interval, PhysRegToAdd) ==
              LiveRegMatrix::IK_Free)
           {
+              /*
               MCRegister SuperRegister = PhysRegToAdd;
               auto SuperRegisters = TRI->superregs(SuperRegister);
               while(!SuperRegisters.empty())
@@ -300,11 +301,12 @@ RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
                   SuperRegister = *SuperRegisters.begin();
                   SuperRegisters = TRI->superregs(SuperRegister);
               }
+              */
 
               bool Exists = false;
               for(MCRegister PhysRegToCheck : PhysRegs)
               {
-                  if(PhysRegToCheck.id() == SuperRegister.id())
+                  if(TRI->regsOverlap(PhysRegToCheck, PhysRegToAdd))
                   {
                       Exists = true;
                       break;
@@ -313,7 +315,7 @@ RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
 
               if(!Exists)
               {
-                  PhysRegs.push_back(SuperRegister);
+                  PhysRegs.push_back(PhysRegToAdd);
               }
           }
         }
@@ -380,6 +382,11 @@ RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
     {
         unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtRegIndex);
 
+        Register VirtReg = VirtRegs[VirtRegIndex];
+        LiveInterval *Interval = &LIS->getInterval(VirtReg);
+
+        AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+
         for(unsigned PhysRegIndex = 0;
             PhysRegIndex < PhysRegCount;
             ++PhysRegIndex)
@@ -387,13 +394,9 @@ RegInterferenceGraph RAGraph::buildGraph(std::vector<Register> &VirtRegs,
             bool CanAssign = false;
             bool IsHint = false;
 
-            Register VirtReg = VirtRegs[VirtRegIndex];
-            LiveInterval *Interval = &LIS->getInterval(VirtReg);
-
-            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
             for(MCRegister PhysReg : Order)
             {
-                if(TRI->isSuperRegisterEq(PhysReg, PhysRegs[PhysRegIndex]))
+                if(TRI->regsOverlap(PhysReg, PhysRegs[PhysRegIndex]))
                 {
                     if(Matrix->checkInterference(*Interval, PhysReg) == LiveRegMatrix::IK_Free)
                     {
@@ -436,7 +439,6 @@ void RAGraph::assignSolution(std::vector<int> &Solution,
         ++VirtIndex)
     {
         Register VirtReg = VirtRegs[VirtIndex];
-        LiveInterval *Interval = &LIS->getInterval(VirtReg);
         if(Solution[VirtIndex] != -1)
         {
             MCRegister SuperReg = PhysRegs[Solution[VirtIndex]];
@@ -447,9 +449,11 @@ void RAGraph::assignSolution(std::vector<int> &Solution,
 
             for(MCRegister PhysReg : Order)
             {
-                if(TRI->isSuperRegisterEq(PhysReg, SuperReg))
+                if(TRI->regsOverlap(PhysReg, SuperReg))
                 {
                     assert(PhysReg.isValid());
+                    //std::cerr << TRI->getName(PhysReg) << ',' << TRI->getName(SuperReg) << std::endl;
+                    LiveInterval *Interval = &LIS->getInterval(VirtReg);
                     Matrix->assign(*Interval, PhysReg);
                     IsAssigned = true;
                     break;

@@ -59,8 +59,6 @@ private:
     unsigned WordBitMask;
     unsigned WordBitCount;
     unsigned AdjacencyWordCount;
-    unsigned AdjacencyBitMask;
-    unsigned AdjacencyBitCount;
 };
 
 #endif
