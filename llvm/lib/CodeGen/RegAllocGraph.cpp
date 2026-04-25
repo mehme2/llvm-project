@@ -38,6 +38,8 @@ static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm
 
 static llvm::cl::opt<unsigned> RegallocSeed("regalloc-seed", llvm::cl::init(0), llvm::cl::Hidden, llvm::cl::desc("srand seed for every function's register allocation"));
 
+static llvm::cl::opt<float> UnassignThreshold("unassign-threshold", llvm::cl::init(1.0f), llvm::cl::Hidden, llvm::cl::desc("unassign threshold"));
+
 class RAGraphInit : public MachineFunctionPass {
   RegAllocFilterFunc F;
 
@@ -698,7 +700,11 @@ bool RAGraph::iterate()
         }
     }
 
-    if(UnassignUntilComplete && (NUncolored != 0))
+    bool DidUnassign = false;
+
+    if(UnassignUntilComplete &&
+       (NUncolored != 0) &&
+       ((float)NAssigned < (UnassignThreshold*(float)Solution.size())))
     {
         unsigned AllVirtRegs = MRI->getNumVirtRegs();
 
@@ -713,6 +719,7 @@ bool RAGraph::iterate()
                 {
                     LiveInterval *Interval = &LIS->getInterval(VirtReg);
                     Matrix->unassign(*Interval);
+                    DidUnassign = true;
                 }
             }
         }
@@ -725,7 +732,7 @@ bool RAGraph::iterate()
     if (RegAllocBase::VerifyEnabled)
         MF->verify(LIS, Indexes, "After iteration", &errs());
 
-    return (NUncolored != 0);
+    return ((NUncolored != 0) || DidUnassign);
 }
 
 bool RAGraph::run(MachineFunction &mf)
