@@ -170,6 +170,7 @@ class RAGraph : private LiveRangeEdit::Delegate
     regalloc_graph_solver *Solver = RegAllocBitEASolver;
 
     bool iterate();
+    void unassignAll();
 
     bool LRE_CanEraseVirtReg(Register) override;
     void LRE_WillShrinkVirtReg(Register) override;
@@ -578,6 +579,26 @@ void RAGraph::onUnassigned(Register VirtReg)
     MF->verify(LIS, Indexes, "After spilling", &errs());
 }
 
+void RAGraph::unassignAll()
+{
+    unsigned AllVirtRegs = MRI->getNumVirtRegs();
+
+    for(unsigned VirtIndex = 0;
+        VirtIndex < AllVirtRegs;
+        ++VirtIndex)
+    {
+        Register VirtReg = Register::index2VirtReg(VirtIndex);
+        if(shouldAssign(VirtReg))
+        {
+            if(VRM->hasPhys(VirtReg))
+            {
+                LiveInterval *Interval = &LIS->getInterval(VirtReg);
+                Matrix->unassign(*Interval);
+            }
+        }
+    }
+}
+
 bool RAGraph::iterate()
 {
     std::vector<Register> VirtRegs;
@@ -588,10 +609,22 @@ bool RAGraph::iterate()
     unsigned PhysRegCount = PhysRegs.size();
     unsigned VirtRegCount = VirtRegs.size();
 
+    std::cout << std::endl << "Virt + Phys: " << VirtRegCount << " + " << PhysRegCount << std::endl;
+
+    if((VirtRegCount == 1) &&
+       (PhysRegCount == 1))
+    {
+        Matrix->assign(LIS->getInterval(VirtRegs[0]),
+                       PhysRegs[0]);
+        return false;
+    }
+
     if(VirtRegCount == 0) return false;
 
     if(PhysRegCount == 0)
     {
+        unassignAll();
+
         for(Register VirtReg : VirtRegs)
         {
             onUnassigned(VirtReg);
@@ -700,29 +733,11 @@ bool RAGraph::iterate()
         }
     }
 
-    bool DidUnassign = false;
-
     if(UnassignUntilComplete &&
        (NUncolored != 0) &&
-       ((float)NAssigned < (UnassignThreshold*(float)Solution.size())))
+       ((float)NAssigned < (UnassignThreshold*(float)VirtRegCount)))
     {
-        unsigned AllVirtRegs = MRI->getNumVirtRegs();
-
-        for(unsigned VirtIndex = 0;
-            VirtIndex < AllVirtRegs;
-            ++VirtIndex)
-        {
-            Register VirtReg = Register::index2VirtReg(VirtIndex);
-            if(shouldAssign(VirtReg))
-            {
-                if(VRM->hasPhys(VirtReg))
-                {
-                    LiveInterval *Interval = &LIS->getInterval(VirtReg);
-                    Matrix->unassign(*Interval);
-                    DidUnassign = true;
-                }
-            }
-        }
+        unassignAll();
     }
 
     std::cout << NAssigned << "/" << VirtRegCount << std::endl;
@@ -732,7 +747,7 @@ bool RAGraph::iterate()
     if (RegAllocBase::VerifyEnabled)
         MF->verify(LIS, Indexes, "After iteration", &errs());
 
-    return ((NUncolored != 0) || DidUnassign);
+    return true;
 }
 
 bool RAGraph::run(MachineFunction &mf)
