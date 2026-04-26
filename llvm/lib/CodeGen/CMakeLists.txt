@@ -195,6 +195,7 @@ add_llvm_component_library(LLVMCodeGen
   RegAllocBEAM.cpp
   RegAllocTabuCol.cpp
   RegAllocPython.cpp
+  RegAllocChaitin.cpp
   RegAllocBitEA.c
   RegAllocBitEA.cpp 
   RegAllocCounter.cpp

@@ -8,6 +8,7 @@ REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocBitEASolver, bitea) \
 REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocBEAMSolver, beam) \
 REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocTabuColSolver, tabucol) \
 REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocPythonSolver, python) \
+REGALLOC_GRAPH_SOLVER_ENTRY(RegAllocChaitinSolver, chaitin) \
 
 
 #define REGALLOC_GRAPH_SOLVER(Name) std::vector<int> Name(const RegInterferenceGraph &Graph)
