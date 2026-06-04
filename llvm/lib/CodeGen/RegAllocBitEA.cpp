@@ -2,8 +2,10 @@
 #include "RegAllocBitEA.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
 
-#include <iostream>
+#define DEBUG_TYPE "ragraph"
+using llvm::dbgs;
 
 #include "llvm/Support/MathExtras.h"
 
@@ -72,7 +74,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
         &BestSolutionTime,
         &UncoloredCount);
 
-    std::cout << "Best Fitness: " << BestFitness << std::endl;
+    LLVM_DEBUG(dbgs() << "Best Fitness: " << BestFitness << "\n");
 
     int RemovedVertices = 0;
     for(int ColorIndex = 0;
@@ -226,7 +228,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBitEASolver)
                         */
                         if(PhysRegIndex == -1)
                         {
-                            std::cout << "Warning: Color with no physical." << std::endl;
+                            LLVM_DEBUG(dbgs() << "Warning: Color with no physical." << "\n");
                             break;
                         }
                         assert(!Graph.hasEdge(VertIndex,

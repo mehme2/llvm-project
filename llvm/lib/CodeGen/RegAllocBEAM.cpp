@@ -1,7 +1,10 @@
 #include "RegAllocGraphSolvers.h"
 #include "RegAllocBEAM.h"
 #include "llvm/Support/CommandLine.h"
-#include <iostream>
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "ragraph"
+using llvm::dbgs;
 
 static llvm::cl::opt<uint32_t> IterationCount("beam-iterations", llvm::cl::init(10000), llvm::cl::Hidden, llvm::cl::desc("beam iteration count"));
 static llvm::cl::opt<uint32_t> PopulationCount("beam-population", llvm::cl::init(16), llvm::cl::Hidden, llvm::cl::desc("beam population count"));
@@ -59,7 +62,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
         &BEAMSolution
         );
 
-    std::cout << "Best Fitness: " << BEAMSolution.fitness << std::endl;
+    LLVM_DEBUG(dbgs() << "Best Fitness: " << BEAMSolution.fitness << "\n");
 
     /*
     int RemovedVertices = 0;
@@ -216,7 +219,7 @@ REGALLOC_GRAPH_SOLVER(RegAllocBEAMSolver)
                         */
                         if(PhysRegIndex == -1)
                         {
-                            std::cout << "Warning: Color with no physical." << std::endl;
+                            LLVM_DEBUG(dbgs() << "Warning: Color with no physical." << "\n");
                             break;
                         }
                         assert(!Graph.hasEdge(VertIndex, Graph.physIndexToVertIndex(PhysRegIndex)));

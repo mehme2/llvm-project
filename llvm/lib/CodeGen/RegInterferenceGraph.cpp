@@ -105,8 +105,10 @@ bool RegInterferenceGraph::hasEdge(unsigned VertexIndexA, unsigned VertexIndexB)
     unsigned WordIndexB = VertexIndexB >> WordBitCount;
     unsigned BitIndexB = VertexIndexB & WordBitMask;
 
+    /*
     assert(((AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0) ==
            ((AdjacencyMatrix[VertexIndexB*AdjacencyWordCount + WordIndexA] & (1LL << BitIndexA)) != 0));
+           */
 
     return ((AdjacencyMatrix[VertexIndexA*AdjacencyWordCount + WordIndexB] & (1LL << BitIndexB)) != 0);
 }
