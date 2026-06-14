@@ -1,5 +1,5 @@
 #include "RegAllocGreedy.h"
-#include "RegAllocCounter.h"
+//#include "RegAllocCounter.h"
 #include "RegInterferenceGraph.h"
 #include "AllocationOrder.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
@@ -14,6 +14,13 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "RegisterSplitter.h"
 #include <cassert>
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
+#include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/CodeGen/MachineFunction.h"
+
+#include <fstream>
 
 #include "RegAllocGraphSolvers.h"
 
@@ -33,13 +40,17 @@ static cl::opt<RAGraphUncoloredBehavior> UncoloredBehavior("uncolored-behavior",
                                                            cl::values(clEnumValN(RAGraphUncoloredBehavior::SpillOnly, "spill-only", "Split only"),
                                                                       clEnumValN(RAGraphUncoloredBehavior::Split, "split", "Try to split first"),
                                                                       clEnumValN(RAGraphUncoloredBehavior::Greedy, "greedy", "Greedy allocator behavior")),
-                                                           cl::init(RAGraphUncoloredBehavior::SpillOnly));
+                                                           cl::init(RAGraphUncoloredBehavior::Split));
 
 static llvm::cl::opt<bool> UnassignUntilComplete("unassign-until-complete", llvm::cl::init(true), llvm::cl::Hidden, llvm::cl::desc("unassign every virtual before reconstructing graph"));
 
 static llvm::cl::opt<unsigned> RegallocSeed("regalloc-seed", llvm::cl::init(0), llvm::cl::Hidden, llvm::cl::desc("srand seed for every function's register allocation"));
 
-static llvm::cl::opt<float> UnassignThreshold("unassign-threshold", llvm::cl::init(1.0f), llvm::cl::Hidden, llvm::cl::desc("unassign threshold"));
+static llvm::cl::opt<float> UnassignThreshold("unassign-threshold", llvm::cl::init(2.0f), llvm::cl::Hidden, llvm::cl::desc("unassign threshold"));
+
+static llvm::cl::opt<bool> DoGraphSplitting("do-graph-splitting", llvm::cl::init(true), llvm::cl::Hidden, llvm::cl::desc("split virtuals into non-interfering groups"));
+
+static llvm::cl::opt<std::string> SpillMetricsPath("spill-metrics", llvm::cl::init(""), llvm::cl::Hidden, llvm::cl::desc("path to save spill metrics"));
 
 class RAGraphInit : public MachineFunctionPass {
   RegAllocFilterFunc F;
@@ -177,6 +188,11 @@ class RAGraph : private LiveRangeEdit::Delegate
 
     regalloc_graph_solver *Solver = RegAllocBitEASolver;
 
+    std::ofstream SpillMetrics;
+
+    unsigned SpillCount;
+    unsigned Iteration;
+
     bool iterate();
     void unassignAll();
 
@@ -186,7 +202,7 @@ class RAGraph : private LiveRangeEdit::Delegate
 
     bool shouldAssign(Register VirtReg);
 
-    std::vector<GraphContext> buildGraphs();
+    std::vector<GraphContext> buildGraphs(unsigned *PhysCount = 0);
 
     void assignSolution(std::vector<int> &Solution,
                         std::vector<Register> &VirtRegs,
@@ -217,14 +233,7 @@ RAGraph::RAGraph(std::string AlgorithmID, Pass *P, const RegAllocFilterFunc F)
     SpillPlacer = &P->getAnalysis<SpillPlacementWrapperLegacy>().getResult();
     Bundles = &P->getAnalysis<EdgeBundlesWrapperLegacy>().getEdgeBundles();
 
-    if(RegallocSeed)
-    {
-        srand(RegallocSeed);
-    }
-    else
-    {
-        srand(time(0));
-    }
+    srand(time(0));
 
 #define REGALLOC_GRAPH_SOLVER_ENTRY(Name, ID) \
     if(AlgorithmID == #ID) Solver = Name;
@@ -267,7 +276,7 @@ bool RAGraph::shouldAssign(Register VirtReg)
     return Result;
 }
 
-std::vector<GraphContext> RAGraph::buildGraphs()
+std::vector<GraphContext> RAGraph::buildGraphs(unsigned *PhysCount)
 {
     std::vector<Register> VirtRegs;
     std::vector<MCRegister> PhysRegs;
@@ -338,6 +347,8 @@ std::vector<GraphContext> RAGraph::buildGraphs()
 
     unsigned PhysRegCount = PhysRegs.size();
     unsigned VirtRegCount = VirtRegs.size();
+
+    if(PhysCount) *PhysCount = PhysRegCount;
 
     RegInterferenceGraph Graph(PhysRegCount, VirtRegCount);
 
@@ -440,270 +451,275 @@ std::vector<GraphContext> RAGraph::buildGraphs()
         }
     }
 
-    // NOTE: Words are 64-bit
-    unsigned TotalVertexCount = Graph.getVertexCount();
-    unsigned ComponentCount = VirtRegCount;
-    unsigned WordCountPerComponent = ((TotalVertexCount >> 6) +
-                                      ((TotalVertexCount & 63) ? 1 : 0));
-    unsigned TotalWordCount = WordCountPerComponent*ComponentCount;
-    std::vector<uint64_t> ComponentMatrix(TotalWordCount);
-    std::vector<uint64_t> ComponentMembers(TotalWordCount, 0);
-    std::vector<unsigned> ComponentSizes(ComponentCount, 1);
+    std::vector<GraphContext> Result;
 
-    const uint64_t *AdjacencyMatrix = Graph.getAdjacencyMatrix();
-
-    for(unsigned WordIndex = 0;
-        WordIndex < TotalWordCount;
-        ++WordIndex)
+    if(DoGraphSplitting)
     {
-        ComponentMatrix[WordIndex] = AdjacencyMatrix[WordIndex + PhysRegCount*WordCountPerComponent];
-    }
+        // NOTE: Words are 64-bit
+        unsigned TotalVertexCount = Graph.getVertexCount();
+        unsigned ComponentCount = VirtRegCount;
+        unsigned WordCountPerComponent = ((TotalVertexCount >> 6) +
+                                          ((TotalVertexCount & 63) ? 1 : 0));
+        unsigned TotalWordCount = WordCountPerComponent*ComponentCount;
+        std::vector<uint64_t> ComponentMatrix(TotalWordCount);
+        std::vector<uint64_t> ComponentMembers(TotalWordCount, 0);
+        std::vector<unsigned> ComponentSizes(ComponentCount, 1);
 
-    std::vector<uint64_t> VirtMask(WordCountPerComponent, 0);
-    std::vector<uint64_t> PhysMask(WordCountPerComponent, 0);
-    for(unsigned WordIndex = 0;
-        WordIndex < WordCountPerComponent;
-        ++WordIndex)
-    {
-        for(unsigned BitIndex = 0;
-            BitIndex < 64;
-            ++BitIndex)
+        const uint64_t *AdjacencyMatrix = Graph.getAdjacencyMatrix();
+
+        for(unsigned WordIndex = 0;
+            WordIndex < TotalWordCount;
+            ++WordIndex)
         {
-            unsigned VertIndex = BitIndex + 64*WordIndex;
-
-            if(VertIndex < TotalVertexCount)
-            {
-                if(Graph.isPhys(VertIndex))
-                {
-                    PhysMask[WordIndex] |= ((uint64_t)1 << BitIndex);
-                }
-                else
-                {
-                    VirtMask[WordIndex] |= ((uint64_t)1 << BitIndex);
-                }
-            }
+            ComponentMatrix[WordIndex] = AdjacencyMatrix[WordIndex + PhysRegCount*WordCountPerComponent];
         }
-    }
 
-    for(unsigned ComponentIndex = 0;
-        ComponentIndex < ComponentCount;
-        ++ComponentIndex)
-    {
+        std::vector<uint64_t> VirtMask(WordCountPerComponent, 0);
+        std::vector<uint64_t> PhysMask(WordCountPerComponent, 0);
         for(unsigned WordIndex = 0;
             WordIndex < WordCountPerComponent;
             ++WordIndex)
         {
-            ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex] ^= PhysMask[WordIndex];
-            ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex] = PhysMask[WordIndex] &
-                ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex];
+            for(unsigned BitIndex = 0;
+                BitIndex < 64;
+                ++BitIndex)
+            {
+                unsigned VertIndex = BitIndex + 64*WordIndex;
+
+                if(VertIndex < TotalVertexCount)
+                {
+                    if(Graph.isPhys(VertIndex))
+                    {
+                        PhysMask[WordIndex] |= ((uint64_t)1 << BitIndex);
+                    }
+                    else
+                    {
+                        VirtMask[WordIndex] |= ((uint64_t)1 << BitIndex);
+                    }
+                }
+            }
         }
 
-        unsigned VertIndex = Graph.virtIndexToVertIndex(ComponentIndex);
-        unsigned WordIndex = VertIndex >> 6;
-        unsigned BitIndex = VertIndex & 63;
-
-        //ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex] |= (1ULL << BitIndex);
-        ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex] |= (1ULL << BitIndex);
-    }
-
-    bool Coalesced;
-    do
-    {
-        Coalesced = false;
-
-        for(unsigned ComponentIndexA = 0;
-            ComponentIndexA < ComponentCount;
-            ++ComponentIndexA)
+        for(unsigned ComponentIndex = 0;
+            ComponentIndex < ComponentCount;
+            ++ComponentIndex)
         {
-            for(unsigned ComponentIndexB = ComponentIndexA + 1;
-                ComponentIndexB < ComponentCount;
-                ++ComponentIndexB)
+            for(unsigned WordIndex = 0;
+                WordIndex < WordCountPerComponent;
+                ++WordIndex)
             {
-                uint64_t AndOrPhys = 0;
-                uint64_t AndOrVirt = 0;
+                ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex] ^= PhysMask[WordIndex];
+                ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex] = PhysMask[WordIndex] &
+                    ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex];
+            }
 
-                for(unsigned WordIndex = 0;
-                    WordIndex < WordCountPerComponent;
-                    ++WordIndex)
+            unsigned VertIndex = Graph.virtIndexToVertIndex(ComponentIndex);
+            unsigned WordIndex = VertIndex >> 6;
+            unsigned BitIndex = VertIndex & 63;
+
+            //ComponentMatrix[ComponentIndex*WordCountPerComponent + WordIndex] |= (1ULL << BitIndex);
+            ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex] |= (1ULL << BitIndex);
+        }
+
+        bool Coalesced;
+        do
+        {
+            Coalesced = false;
+
+            for(unsigned ComponentIndexA = 0;
+                ComponentIndexA < ComponentCount;
+                ++ComponentIndexA)
+            {
+                for(unsigned ComponentIndexB = ComponentIndexA + 1;
+                    ComponentIndexB < ComponentCount;
+                    ++ComponentIndexB)
                 {
-                    uint64_t And1 = (ComponentMatrix[ComponentIndexA*WordCountPerComponent + WordIndex] &
-                                     ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex]);
-                    uint64_t And2 = (ComponentMembers[ComponentIndexA*WordCountPerComponent + WordIndex] &
-                                     ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex]);
+                    uint64_t AndOrPhys = 0;
+                    uint64_t AndOrVirt = 0;
 
-                    uint64_t And = And1 | And2;
- 
-                    AndOrPhys |= And & PhysMask[WordIndex];
-                    AndOrVirt |= And & VirtMask[WordIndex];
-                }
-
-                if(AndOrPhys && AndOrVirt)
-                {
                     for(unsigned WordIndex = 0;
                         WordIndex < WordCountPerComponent;
                         ++WordIndex)
                     {
-                        ComponentMatrix[ComponentIndexA*WordCountPerComponent + WordIndex] |=
-                            ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex];
+                        uint64_t And1 = (ComponentMatrix[ComponentIndexA*WordCountPerComponent + WordIndex] &
+                                         ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex]);
+                        uint64_t And2 = (ComponentMembers[ComponentIndexA*WordCountPerComponent + WordIndex] &
+                                         ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex]);
 
-                        ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex] =
-                            ComponentMatrix[(ComponentCount - 1)*WordCountPerComponent + WordIndex];
+                        uint64_t And = And1 | And2;
 
-                        ComponentMembers[ComponentIndexA*WordCountPerComponent + WordIndex] |=
-                            ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex];
-
-                        ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex] =
-                            ComponentMembers[(ComponentCount - 1)*WordCountPerComponent + WordIndex];
+                        AndOrPhys |= And & PhysMask[WordIndex];
+                        AndOrVirt |= And & VirtMask[WordIndex];
                     }
 
-                    ComponentSizes[ComponentIndexA] += ComponentSizes[ComponentIndexB];
-                    ComponentSizes[ComponentIndexB] = ComponentSizes[ComponentCount - 1];
+                    if(AndOrPhys && AndOrVirt)
+                    {
+                        for(unsigned WordIndex = 0;
+                            WordIndex < WordCountPerComponent;
+                            ++WordIndex)
+                        {
+                            ComponentMatrix[ComponentIndexA*WordCountPerComponent + WordIndex] |=
+                                ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex];
 
-                    --ComponentCount;
-                    --ComponentIndexB;
+                            ComponentMatrix[ComponentIndexB*WordCountPerComponent + WordIndex] =
+                                ComponentMatrix[(ComponentCount - 1)*WordCountPerComponent + WordIndex];
 
-                    Coalesced = true;
+                            ComponentMembers[ComponentIndexA*WordCountPerComponent + WordIndex] |=
+                                ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex];
+
+                            ComponentMembers[ComponentIndexB*WordCountPerComponent + WordIndex] =
+                                ComponentMembers[(ComponentCount - 1)*WordCountPerComponent + WordIndex];
+                        }
+
+                        ComponentSizes[ComponentIndexA] += ComponentSizes[ComponentIndexB];
+                        ComponentSizes[ComponentIndexB] = ComponentSizes[ComponentCount - 1];
+
+                        --ComponentCount;
+                        --ComponentIndexB;
+
+                        Coalesced = true;
+                    }
                 }
             }
         }
-    }
-    while(Coalesced);
+        while(Coalesced);
 
-    LLVM_DEBUG(dbgs() << "Total Virtuals: " << VirtRegCount << "\n");
-    LLVM_DEBUG(dbgs() << "ComponentCount: " << ComponentCount << "\n");
-    LLVM_DEBUG(dbgs() << "Sizes: ");
+        LLVM_DEBUG(dbgs() << "Total Virtuals: " << VirtRegCount << "\n");
+        LLVM_DEBUG(dbgs() << "ComponentCount: " << ComponentCount << "\n");
+        LLVM_DEBUG(dbgs() << "Sizes: ");
 
-    for(unsigned ComponentIndex = 0;
-        ComponentIndex < ComponentCount;
-        ++ComponentIndex)
-    {
-        LLVM_DEBUG(dbgs() << ComponentSizes[ComponentIndex] << ", ");
-    }
+        for(unsigned ComponentIndex = 0;
+            ComponentIndex < ComponentCount;
+            ++ComponentIndex)
+        {
+            LLVM_DEBUG(dbgs() << ComponentSizes[ComponentIndex] << ", ");
+        }
 
-    LLVM_DEBUG(dbgs() << "\n");
+        LLVM_DEBUG(dbgs() << "\n");
 
 #if 0
-    LLVM_DEBUG(dbgs() << "Edges:\n");
-    for(unsigned ComponentIndex = 0;
-        ComponentIndex < ComponentCount;
-        ++ComponentIndex)
-    {
-        LLVM_DEBUG(dbgs() << ComponentIndex << ": ");
-        for(unsigned WordIndex = 0;
-            WordIndex < WordCountPerComponent;
-            ++WordIndex)
+        LLVM_DEBUG(dbgs() << "Edges:\n");
+        for(unsigned ComponentIndex = 0;
+            ComponentIndex < ComponentCount;
+            ++ComponentIndex)
         {
-            for(unsigned BitIndex = 0;
-                BitIndex < 64;
-                ++BitIndex)
+            LLVM_DEBUG(dbgs() << ComponentIndex << ": ");
+            for(unsigned WordIndex = 0;
+                WordIndex < WordCountPerComponent;
+                ++WordIndex)
             {
-                LLVM_DEBUG(dbgs() << ((ComponentMatrix[WordIndex + WordCountPerComponent*ComponentIndex] & (1ULL << BitIndex)) ? 1 : 0));
+                for(unsigned BitIndex = 0;
+                    BitIndex < 64;
+                    ++BitIndex)
+                {
+                    LLVM_DEBUG(dbgs() << ((ComponentMatrix[WordIndex + WordCountPerComponent*ComponentIndex] & (1ULL << BitIndex)) ? 1 : 0));
+                }
             }
+            LLVM_DEBUG(dbgs() << "\n");
         }
-        LLVM_DEBUG(dbgs() << "\n");
-    }
 
-    LLVM_DEBUG(dbgs() << "Vertices:\n");
-    for(unsigned ComponentIndex = 0;
-        ComponentIndex < ComponentCount;
-        ++ComponentIndex)
-    {
-        LLVM_DEBUG(dbgs() << ComponentIndex << ": ");
-        for(unsigned WordIndex = 0;
-            WordIndex < WordCountPerComponent;
-            ++WordIndex)
+        LLVM_DEBUG(dbgs() << "Vertices:\n");
+        for(unsigned ComponentIndex = 0;
+            ComponentIndex < ComponentCount;
+            ++ComponentIndex)
         {
-            for(unsigned BitIndex = 0;
-                BitIndex < 64;
-                ++BitIndex)
+            LLVM_DEBUG(dbgs() << ComponentIndex << ": ");
+            for(unsigned WordIndex = 0;
+                WordIndex < WordCountPerComponent;
+                ++WordIndex)
             {
-                LLVM_DEBUG(dbgs() << ((ComponentMembers[WordIndex + WordCountPerComponent*ComponentIndex] & (1ULL << BitIndex)) ? 1 : 0));
+                for(unsigned BitIndex = 0;
+                    BitIndex < 64;
+                    ++BitIndex)
+                {
+                    LLVM_DEBUG(dbgs() << ((ComponentMembers[WordIndex + WordCountPerComponent*ComponentIndex] & (1ULL << BitIndex)) ? 1 : 0));
+                }
             }
+            LLVM_DEBUG(dbgs() << "\n");
         }
-        LLVM_DEBUG(dbgs() << "\n");
-    }
 #endif
 
-    std::vector<GraphContext> Result;
+        for(unsigned ComponentIndex = 0;
+            ComponentIndex < ComponentCount;
+            ++ComponentIndex)
+        {
+            unsigned ComponentVirtCount = 0;
+            unsigned ComponentPhysCount = 0;
+            std::vector<unsigned> ComponentToSuper;
 
-    //if(VirtRegCount > 0) Result.push_back((GraphContext){Graph, VirtRegs, PhysRegs});
+            for(unsigned WordIndex = 0;
+                WordIndex < WordCountPerComponent;
+                ++WordIndex)
+            {
+                uint64_t Word = ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex];
 
-    for(unsigned ComponentIndex = 0;
-        ComponentIndex < ComponentCount;
-        ++ComponentIndex)
+                while(Word)
+                {
+                    unsigned BitIndex = llvm::countr_zero(Word);
+                    if(BitIndex < 64)
+                    {
+                        Word &= ~(((uint64_t)1) << BitIndex);
+                        unsigned VertIndex = 64*WordIndex + BitIndex;
+                        if(Graph.isPhys(VertIndex))
+                        {
+                            ++ComponentPhysCount;
+                        }
+                        else
+                        {
+                            ++ComponentVirtCount;
+                        }
+                        ComponentToSuper.push_back(VertIndex);
+                    }
+                }
+            }
+
+            assert(ComponentVirtCount == ComponentSizes[ComponentIndex]);
+
+            unsigned ComponentVertCount = ComponentVirtCount + ComponentPhysCount;
+
+            Result.emplace_back((GraphContext){RegInterferenceGraph(ComponentPhysCount, ComponentVirtCount)});
+
+            GraphContext &Context = Result[Result.size() - 1];
+
+            for(unsigned VertIndexA = 0;
+                VertIndexA < ComponentVertCount;
+                ++VertIndexA)
+            {
+                unsigned VertIndexSuperA = ComponentToSuper[VertIndexA];
+                if(Graph.isPhys(VertIndexSuperA))
+                {
+                    Context.PhysRegs.push_back(PhysRegs[Graph.vertIndexToPhysIndex(VertIndexSuperA)]);
+                }
+                else
+                {
+                    unsigned VirtIndex = Context.Graph.vertIndexToVirtIndex(VertIndexA);
+                    unsigned VirtIndexSuper = Graph.vertIndexToVirtIndex(VertIndexSuperA);
+
+                    Context.VirtRegs.push_back(VirtRegs[VirtIndexSuper]);
+
+                    Context.Graph.setWeight(VirtIndex,
+                                            Graph.getWeight(VirtIndexSuper));
+
+                    Context.Graph.setSpillable(VirtIndex,
+                                               Graph.isSpillable(VirtIndexSuper));
+                }
+
+                for(unsigned VertIndexB = 0;
+                    VertIndexB < ComponentVertCount;
+                    ++VertIndexB)
+                {
+                    unsigned VertIndexSuperB = ComponentToSuper[VertIndexB];
+                    if(Graph.hasEdge(VertIndexSuperA, VertIndexSuperB))
+                    {
+                        Context.Graph.addEdge(VertIndexA, VertIndexB);
+                    }
+                }
+            }
+        }
+    }
+    else
     {
-        unsigned ComponentVirtCount = 0;
-        unsigned ComponentPhysCount = 0;
-        std::vector<unsigned> ComponentToSuper;
-
-        for(unsigned WordIndex = 0;
-            WordIndex < WordCountPerComponent;
-            ++WordIndex)
-        {
-            uint64_t Word = ComponentMembers[ComponentIndex*WordCountPerComponent + WordIndex];
-
-            while(Word)
-            {
-                unsigned BitIndex = llvm::countr_zero(Word);
-                if(BitIndex < 64)
-                {
-                    Word &= ~(((uint64_t)1) << BitIndex);
-                    unsigned VertIndex = 64*WordIndex + BitIndex;
-                    if(Graph.isPhys(VertIndex))
-                    {
-                        ++ComponentPhysCount;
-                    }
-                    else
-                    {
-                        ++ComponentVirtCount;
-                    }
-                    ComponentToSuper.push_back(VertIndex);
-                }
-            }
-        }
-
-        assert(ComponentVirtCount == ComponentSizes[ComponentIndex]);
-
-        unsigned ComponentVertCount = ComponentVirtCount + ComponentPhysCount;
-
-        Result.emplace_back((GraphContext){RegInterferenceGraph(ComponentPhysCount, ComponentVirtCount)});
-
-        GraphContext &Context = Result[Result.size() - 1];
-
-        for(unsigned VertIndexA = 0;
-            VertIndexA < ComponentVertCount;
-            ++VertIndexA)
-        {
-            unsigned VertIndexSuperA = ComponentToSuper[VertIndexA];
-            if(Graph.isPhys(VertIndexSuperA))
-            {
-                Context.PhysRegs.push_back(PhysRegs[Graph.vertIndexToPhysIndex(VertIndexSuperA)]);
-            }
-            else
-            {
-                unsigned VirtIndex = Context.Graph.vertIndexToVirtIndex(VertIndexA);
-                unsigned VirtIndexSuper = Graph.vertIndexToVirtIndex(VertIndexSuperA);
-
-                Context.VirtRegs.push_back(VirtRegs[VirtIndexSuper]);
-
-                Context.Graph.setWeight(VirtIndex,
-                                        Graph.getWeight(VirtIndexSuper));
-
-                Context.Graph.setSpillable(VirtIndex,
-                                           Graph.isSpillable(VirtIndexSuper));
-            }
-
-            for(unsigned VertIndexB = 0;
-                VertIndexB < ComponentVertCount;
-                ++VertIndexB)
-            {
-                unsigned VertIndexSuperB = ComponentToSuper[VertIndexB];
-                if(Graph.hasEdge(VertIndexSuperA, VertIndexSuperB))
-                {
-                    Context.Graph.addEdge(VertIndexA, VertIndexB);
-                }
-            }
-        }
+        if(VirtRegCount > 0) Result.push_back((GraphContext){Graph, VirtRegs, PhysRegs});
     }
 
     return Result;
@@ -756,7 +772,7 @@ void RAGraph::onUnassigned(Register VirtReg)
 
   if(UncoloredBehavior == RAGraphUncoloredBehavior::Greedy)
   {
-      assert("greedy option unsupported");
+      assert(false && "greedy option unsupported");
       /*
       MCRegister PhysReg = RAGreedy::selectOrSplit(VirtReg, NewVRegs);
       if(PhysReg && (PhysReg != ~0u))
@@ -840,7 +856,7 @@ void RAGraph::onUnassigned(Register VirtReg)
                      TimerGroupDescription, TimePassesIsEnabled);
                      */
   //std::cout << "Spilling " << VirtReg << std::endl;
-  RegAllocCounter::addSpillage(Interval);
+  ++SpillCount;
   LiveRangeEdit LRE(Interval, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   SpillerInstance->spill(LRE, &Order);
   ExtraInfo->setStage(NewVRegs.begin(), NewVRegs.end(), RS_Done);
@@ -879,163 +895,166 @@ void RAGraph::unassignAll()
 
 bool RAGraph::iterate()
 {
-    std::vector<GraphContext> GraphContexts = buildGraphs();
+    unsigned TotalPhysCount;
+    std::vector<GraphContext> GraphContexts = buildGraphs(&TotalPhysCount);
 
     unsigned AllVirtRegsBefore = MRI->getNumVirtRegs();
 
     if(GraphContexts.size() == 0) return false;
 
     unsigned NAssigned = 0;
-    unsigned NUncolored = 0;
     unsigned TotalVirtCount = 0;
 
     for(GraphContext &Context : GraphContexts)
     {
-    unsigned PhysRegCount = Context.PhysRegs.size();
-    unsigned VirtRegCount = Context.VirtRegs.size();
+        unsigned PhysRegCount = Context.PhysRegs.size();
+        unsigned VirtRegCount = Context.VirtRegs.size();
 
-    LLVM_DEBUG(dbgs() << "\nVirt + Phys: " << VirtRegCount << " + " << PhysRegCount << "\n");
+        LLVM_DEBUG(dbgs() << "\nVirt + Phys: " << VirtRegCount << " + " << PhysRegCount << "\n");
 
-    TotalVirtCount += VirtRegCount;
+        TotalVirtCount += VirtRegCount;
 
-    if(VirtRegCount == 1)
-    {
-        Register VirtReg = Context.VirtRegs[0];
-        AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
-        LiveInterval &Interval = LIS->getInterval(VirtReg);
-
-        for(MCRegister PhysReg : Order)
+        if(VirtRegCount == 1)
         {
-            if(Matrix->checkInterference(Interval, PhysReg) == LiveRegMatrix::IK_Free)
+            Register VirtReg = Context.VirtRegs[0];
+            AllocationOrder Order = AllocationOrder::create(VirtReg, *VRM, RegClassInfo, Matrix);
+            LiveInterval &Interval = LIS->getInterval(VirtReg);
+
+            for(MCRegister PhysReg : Order)
             {
-                Matrix->assign(Interval, PhysReg);
-                ++NAssigned;
-                break;
+                if(Matrix->checkInterference(Interval, PhysReg) == LiveRegMatrix::IK_Free)
+                {
+                    Matrix->assign(Interval, PhysReg);
+                    ++NAssigned;
+                    break;
+                }
             }
+
+            continue;
         }
-
-        continue;
-    }
-
-    NUncolored += VirtRegCount;
-
-    if(PhysRegCount == 0)
-    {
-        //unassignAll();
-
-        for(Register VirtReg : Context.VirtRegs)
-        {
-            onUnassigned(VirtReg);
-        }
-
-        continue;
-    }
-
-#if 0
-    if(false)
-    {
-        RegInterferenceGraph RestrictedGraph = Graph;
-        RestrictedGraph.addHintsAsEdges();
-
-        std::vector<int> Solution = Solver(RestrictedGraph);
-
-        unsigned IterationAssignCount = 0;
-        for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
-
-        assignSolution(Solution, VirtRegs, PhysRegs);
-
-        std::cout << "Assigned " << IterationAssignCount << " hints" << std::endl;
-
-        NAssigned += IterationAssignCount;
-        NUncolored -= IterationAssignCount;
-
-        if(IterationAssignCount)
-        {
-            Graph = buildGraph(VirtRegs, PhysRegs);
-
-            PhysRegCount = PhysRegs.size();
-            VirtRegCount = VirtRegs.size();
-        }
-
-        if(VirtRegCount == 0) return false;
 
         if(PhysRegCount == 0)
         {
-            for(Register VirtReg : VirtRegs)
+            //unassignAll();
+
+            for(Register VirtReg : Context.VirtRegs)
             {
                 onUnassigned(VirtReg);
             }
 
-            return true;
+            continue;
         }
-    }
-#endif
-
-    std::vector<int> Solution = Solver(Context.Graph);
-
-    /*
-    for(unsigned VirtIndexA = 0;
-        VirtIndexA < VirtRegCount;
-        ++VirtIndexA)
-    {
-        int SolutionA = Solution[VirtIndexA];
-        if(SolutionA != -1)
-        {
-            unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtIndexA);
-
-            for(unsigned VirtIndexB = 0;
-                VirtIndexB < VirtIndexA;
-                ++VirtIndexB)
-            {
-                if(SolutionA == Solution[VirtIndexB])
-                {
-                    unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtIndexB);
-                    assert(!Graph.hasEdge(VertIndexA, VertIndexB));
-                }
-            }
-        }
-    }
-    */
-
-    unsigned IterationAssignCount = 0;
-    for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
-
-    NAssigned += IterationAssignCount;
-    NUncolored -= IterationAssignCount;
 
 #if 0
-    if(NUncolored == 0)
-    {
-        for(unsigned PhysIndex = 0;
-            PhysIndex < PhysRegCount;
-            ++PhysIndex)
+        if(false)
         {
-            MCRegister SuperReg = PhysRegs[PhysIndex];
-            MCRegister CSRAlias = RegClassInfo.getLastCalleeSavedAlias(SuperReg);
-            if(CSRAlias)
+            RegInterferenceGraph RestrictedGraph = Graph;
+            RestrictedGraph.addHintsAsEdges();
+
+            std::vector<int> Solution = Solver(RestrictedGraph);
+
+            unsigned IterationAssignCount = 0;
+            for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
+
+            assignSolution(Solution, VirtRegs, PhysRegs);
+
+            std::cout << "Assigned " << IterationAssignCount << " hints" << std::endl;
+
+            NAssigned += IterationAssignCount;
+            NUncolored -= IterationAssignCount;
+
+            if(IterationAssignCount)
             {
-                std::cout << "Trying removing CSR" << std::endl;
-                RegInterferenceGraph RestrictedGraph = Graph;
-                RestrictedGraph.blockVertex(RestrictedGraph.physIndexToVertIndex(PhysIndex));
+                Graph = buildGraph(VirtRegs, PhysRegs);
 
-                std::vector<int> RestrictedSolution = Solver(RestrictedGraph);
+                PhysRegCount = PhysRegs.size();
+                VirtRegCount = VirtRegs.size();
+            }
 
-                unsigned RestrictedAssignCount = 0;
-                for(int Index : RestrictedSolution) if(Index != -1) ++RestrictedAssignCount;
+            if(VirtRegCount == 0) return false;
 
-                if(RestrictedAssignCount == IterationAssignCount)
+            if(PhysRegCount == 0)
+            {
+                for(Register VirtReg : VirtRegs)
                 {
-                    std::cout << "Success\n";
-                    Solution = RestrictedSolution;
-                    Graph = RestrictedGraph;
+                    onUnassigned(VirtReg);
+                }
+
+                return true;
+            }
+        }
+#endif
+
+        std::vector<int> Solution = Solver(Context.Graph);
+
+        /*
+           for(unsigned VirtIndexA = 0;
+           VirtIndexA < VirtRegCount;
+           ++VirtIndexA)
+           {
+           int SolutionA = Solution[VirtIndexA];
+           if(SolutionA != -1)
+           {
+           unsigned VertIndexA = Graph.virtIndexToVertIndex(VirtIndexA);
+
+           for(unsigned VirtIndexB = 0;
+           VirtIndexB < VirtIndexA;
+           ++VirtIndexB)
+           {
+           if(SolutionA == Solution[VirtIndexB])
+           {
+           unsigned VertIndexB = Graph.virtIndexToVertIndex(VirtIndexB);
+           assert(!Graph.hasEdge(VertIndexA, VertIndexB));
+           }
+           }
+           }
+           }
+           */
+
+        unsigned IterationAssignCount = 0;
+        for(int Index : Solution) if(Index != -1) ++IterationAssignCount;
+
+        NAssigned += IterationAssignCount;
+
+#if 0
+        if(NUncolored == 0)
+        {
+            for(unsigned PhysIndex = 0;
+                PhysIndex < PhysRegCount;
+                ++PhysIndex)
+            {
+                MCRegister SuperReg = PhysRegs[PhysIndex];
+                MCRegister CSRAlias = RegClassInfo.getLastCalleeSavedAlias(SuperReg);
+                if(CSRAlias)
+                {
+                    std::cout << "Trying removing CSR" << std::endl;
+                    RegInterferenceGraph RestrictedGraph = Graph;
+                    RestrictedGraph.blockVertex(RestrictedGraph.physIndexToVertIndex(PhysIndex));
+
+                    std::vector<int> RestrictedSolution = Solver(RestrictedGraph);
+
+                    unsigned RestrictedAssignCount = 0;
+                    for(int Index : RestrictedSolution) if(Index != -1) ++RestrictedAssignCount;
+
+                    if(RestrictedAssignCount == IterationAssignCount)
+                    {
+                        std::cout << "Success\n";
+                        Solution = RestrictedSolution;
+                        Graph = RestrictedGraph;
+                    }
                 }
             }
         }
-    }
 #endif
 
-    assignSolution(Solution, Context.VirtRegs, Context.PhysRegs);
+        assignSolution(Solution, Context.VirtRegs, Context.PhysRegs);
     }
+
+    unsigned SpillsInIteration = 0;
+    unsigned SplitsInIteration = 0;
+
+    float SpillWeight = 0.0f;
+    float SplitWeight = 0.0f;
 
     for(unsigned VirtIndex = 0;
         VirtIndex < AllVirtRegsBefore;
@@ -1046,10 +1065,37 @@ bool RAGraph::iterate()
         {
             if(!VRM->hasPhys(VirtReg))
             {
+                unsigned SpillCountBefore = SpillCount;
+                unsigned SplitCountBefore = Splitter->NumTotalSplits;
+
+                float Weight = LIS->getInterval(VirtReg).weight();
+
                 onUnassigned(VirtReg);
+
+                if(SpillCount != SpillCountBefore)
+                {
+                    SpillsInIteration += SpillCount - SpillCountBefore;
+                    SpillWeight += Weight;
+                }
+
+                if(Splitter->NumTotalSplits != SplitCountBefore)
+                {
+                    SplitsInIteration += Splitter->NumTotalSplits - SplitCountBefore;
+                    SplitWeight += Weight;
+                }
             }
         }
     }
+
+    if(SpillMetrics.good())
+    {
+        SpillMetrics << MF->getFunction().getParent()->getName().str() << "," <<
+            MF->getName().str() << "," << Iteration << "," << TotalPhysCount << "," <<
+            TotalVirtCount << "," << SpillsInIteration << "," << SpillWeight << "," <<
+            SplitsInIteration << "," << SplitWeight << "," << "TO DO" << std::endl;
+    }
+
+    unsigned NUncolored = TotalVirtCount - NAssigned;
 
     if(UnassignUntilComplete &&
        (NUncolored != 0) &&
@@ -1060,10 +1106,12 @@ bool RAGraph::iterate()
 
     LLVM_DEBUG(dbgs() << NAssigned << "/" << TotalVirtCount << "\n");
 
-    RegAllocCounter::count(MRI, LIS, VRM);
+    //RegAllocCounter::count(MRI, LIS, VRM);
 
     if (RegAllocBase::VerifyEnabled)
         MF->verify(LIS, Indexes, "After iteration", &errs());
+
+    ++Iteration;
 
     return true;
 }
@@ -1072,7 +1120,28 @@ bool RAGraph::run(MachineFunction &mf)
 {
     MF = &mf;
 
-    RegAllocCounter::startFunction(MF);
+    //RegAllocCounter::startFunction(MF);
+
+    SpillCount = 0;
+    Iteration = 0;
+
+    if(!SpillMetricsPath.empty())
+    {
+        std::ifstream TestFile(SpillMetricsPath);
+        bool Exists = TestFile.good();
+        TestFile.close();
+
+        SpillMetrics.open(SpillMetricsPath, std::ios::out | std::ios::app);
+        if(!Exists)
+        {
+            SpillMetrics << "Module,Function,Iteration,Physicals,Virtuals,Spill Count,Spill Weight,Split Count,Split Weight,Time\n";
+        }
+    }
+
+    if(RegallocSeed)
+    {
+        srand(RegallocSeed);
+    }
 
     LLVM_DEBUG(dbgs() << mf.getName().str() << "\n");
 
@@ -1120,7 +1189,7 @@ bool RAGraph::run(MachineFunction &mf)
 
     while(iterate());
 
-    RegAllocCounter::count(MRI, LIS, VRM);
+    //RegAllocCounter::count(MRI, LIS, VRM);
 
     SpillerInstance->postOptimization();
     for (auto *DeadInst : DeadRemats) {

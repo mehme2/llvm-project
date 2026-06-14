@@ -595,6 +595,7 @@ void RegisterSplitter::splitAroundRegion(LiveRangeEdit &LREdit,
   }
 
   //++NumGlobalSplits;
+  ++NumTotalSplits;
 
   SmallVector<unsigned, 8> IntvMap;
   SE->finish(&IntvMap);
@@ -1018,6 +1019,7 @@ MCRegister RegisterSplitter::tryLocalSplit(const LiveInterval &VirtReg,
     LLVM_DEBUG(dbgs() << '\n');
   }
   //++NumLocalSplits;
+  ++NumTotalSplits;
 
   return MCRegister();
 }

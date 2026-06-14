@@ -147,6 +147,8 @@ public:
 
     MCRegister trySplit(const LiveInterval &, AllocationOrder &,
                         SmallVectorImpl<Register> &, const SmallVirtRegSet &);
+
+    unsigned NumTotalSplits = 0;
 };
 
 }
